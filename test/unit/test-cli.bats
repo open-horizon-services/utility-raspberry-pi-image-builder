@@ -3,7 +3,12 @@
 # Tests help output, argument parsing, and error conditions
 # Feature: raspberry-pi-image-builder, Property 19: Parameter acceptance and handling
 
-load "helpers"
+setup_file() {
+    export BATS_TEST_DIRNAME="$( cd "$( dirname "$BATS_TEST_FILENAME" )" >/dev/null 2>&1 && pwd )"
+    export PROJECT_ROOT="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
+}
+
+load "../helpers.bats"
 
 setup() {
     setup_test_environment

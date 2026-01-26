@@ -49,7 +49,16 @@ create_test_image() {
 
 # Helper to capture stdout and stderr
 run_script_with_args() {
-    local script_path="${BATS_TEST_DIRNAME}/../build-rpi-image.sh"
+    local script_path
+    if [[ -f "${BATS_TEST_DIRNAME}/../build-rpi-image.sh" ]]; then
+        script_path="${BATS_TEST_DIRNAME}/../build-rpi-image.sh"
+    elif [[ -f "${BATS_TEST_DIRNAME}/../../build-rpi-image.sh" ]]; then
+        script_path="${BATS_TEST_DIRNAME}/../../build-rpi-image.sh"
+    else
+        echo "ERROR: Cannot find build-rpi-image.sh" >&2
+        return 127
+    fi
+    
     local output
     local exit_code
     

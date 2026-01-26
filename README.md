@@ -172,19 +172,38 @@ cat REGISTRY.md
 ```bash
 # Install BATS (Bash Automated Testing System)
 # macOS: brew install bats-core
-# Linux: apt-get install bats or yum install bats
+# Linux: sudo apt-get install bats
 
-# Run all tests
-bats test/
+# Verify BATS is installed
+bats --version
+
+# Run all unit tests (from project root)
+bats test/unit/
 
 # Run specific test file
-bats test/test-platform-detection.bats
+bats test/unit/test-cli.bats
 
-# Run with verbose output
-bats -t test/
+# View test summary
+bats test/unit/ 2>&1 | grep -E "^(ok|not ok|# )" | head -25
 
-# Run property-based tests
-bats test/property-tests/
+# Count passing vs failing tests
+bats test/unit/ 2>&1 | grep -c "^ok"        # Passing
+bats test/unit/ 2>&1 | grep -c "^not ok"    # Failing
+```
+
+**Test Suite:** 20 CLI tests covering argument parsing, validation, and configuration.
+
+**Known Issues:** Some tests fail due to [known bugs](KNOWN-ISSUES.md):
+- Help output shows library help instead of main script help (Issue #2)
+- macOS has PLATFORM_TOOLS initialization bug (Issue #1)
+- Tests require BATS 1.5.0+ (Linux apt version may be older)
+
+**Linux Note:** Ubuntu's default BATS (1.2.1) is outdated. For full test support:
+```bash
+# Install latest BATS from source on Linux
+git clone https://github.com/bats-core/bats-core.git
+cd bats-core
+sudo ./install.sh /usr/local
 ```
 
 ### Code Quality
