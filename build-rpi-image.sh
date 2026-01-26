@@ -119,33 +119,7 @@ cleanup_temp_files() {
     fi
 }
 
-# Platform detection wrapper function
-detect_platform() {
-    # Source library and call its function
-    source "${SCRIPT_DIR}/lib/platform-detect.sh"
-    detect_platform
-}
 
-# Dependency checking wrapper function
-check_dependencies() {
-    # Source library and check dependencies
-    source "${SCRIPT_DIR}/lib/platform-detect.sh"
-    log_info "Checking platform dependencies..."
-    
-    # Only check core tools needed for main script
-    if ! check_dependencies core; then
-        log_error "Core dependency check failed"
-        exit 1
-    fi
-    
-    # Also check mounting tools
-    if ! check_dependencies mounting; then
-        log_error "Mounting dependency check failed"
-        exit 1
-    fi
-    
-    log_info "Dependency check completed successfully"
-}
 
 # Configuration parsing and validation functions
 parse_arguments() {
@@ -387,13 +361,6 @@ log_configuration() {
     log_info "=========================="
 }
 
-# Image mounting wrapper functions
-mount_image() {
-    # Source library and call its function
-    source "${SCRIPT_DIR}/lib/image-mount.sh"
-    detect_platform  # Ensure platform is detected
-    mount_image "$@"
-}
 
 unmount_image() {
     # Source library and call its function
@@ -403,13 +370,6 @@ unmount_image() {
 }
 # These functions are now provided by the image-mount.sh library
 
-# Image verification wrapper functions
-verify_image() {
-    # Source library and call its function
-    source "${SCRIPT_DIR}/lib/image-verify.sh"
-    detect_platform  # Ensure platform is detected
-    verify_image "$@"
-}
 
 verify_image_format_compatibility() {
     # Source library and call its function
@@ -1307,6 +1267,14 @@ list_agents() {
 # Main function
 main() {
     init_script
+    
+    # Source all required libraries
+    source "${SCRIPT_DIR}/lib/platform-detect.sh"
+    source "${SCRIPT_DIR}/lib/image-mount.sh"
+    source "${SCRIPT_DIR}/lib/image-verify.sh"
+    source "${SCRIPT_DIR}/lib/chroot-utils.sh"
+    source "${SCRIPT_DIR}/lib/network-config.sh"
+    source "${SCRIPT_DIR}/lib/horizon-install.sh"
     
     log_info "Starting Raspberry Pi Image Builder"
     
