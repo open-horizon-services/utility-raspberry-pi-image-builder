@@ -38,15 +38,19 @@ The Raspberry Pi Image Builder MVP is **complete and production-ready for Linux 
   - Add retry logic for transient failures
 - ⚡ **Priority**: LOW (for v2.0)
 
-#### **Optional Property Tests (17 tasks marked with *)**
+#### **Property Tests Status (4 files implemented)**
 
-These are **optional enhancements** for comprehensive testing coverage:
+The following **property tests are implemented** under `test/property/`:
 
-- **Property Tests for Core Modules** (Tasks 1.1, 2.1, 3.1, 3.2, 4.1, 4.2, 4.3, 10.1)
-- **Property Tests for Network** (Tasks 6.1, 6.2)
-- **Property Tests for Exchange** (Tasks 7.1, 7.2)
-- **Property Tests for Registry** (Tasks 8.1, 8.2, 8.3)
-- **Property Tests for Validation** (Tasks 9.1, 9.2, 9.3)
+- **Core + Image + Wi-Fi**: Properties 1–5 (`test-core-properties.bats`)
+- **Exchange**: Properties 7–9 (`test-exchange-properties.bats`)
+- **Registry**: Properties 15–16 (`test-registry-properties.bats`)
+- **Validation**: Properties 21–23 (`test-validation-properties.bats`)
+
+**Remaining optional coverage** (if desired for v2.0):
+
+- Additional network property tests beyond current Wi-Fi validation
+- Remaining registry/validation edge cases not covered by Properties 15–16 and 21–23
 
 ### 🚀 **Production Readiness Assessment**
 
@@ -62,17 +66,17 @@ These are **optional enhancements** for comprehensive testing coverage:
 - ✅ **Project Registry**: Automatic agent configuration tracking
 - ✅ **Bug Fixes**: Critical recursion bug discovered and fixed
 
-#### **⚠️  KNOWN ISSUES:**
-- ⚠️ **macOS PLATFORM_TOOLS bug**: Blocks macOS execution (fix pending)
-- ⚠️ **Library function conflicts**: Help shows library help (cosmetic)
-- ⚠️ **Registry parameter error**: Non-critical warning (cosmetic)
+#### **✅ KNOWN ISSUES:**
+- ✅ **macOS PLATFORM_TOOLS bug**: Resolved
+- ✅ **Library function conflicts**: Resolved
+- ✅ **Registry parameter error**: Resolved
 
 ### 🎯 **NEXT STEPS FOR v2.0**
 
 #### **Critical Fixes**
-1. **Fix macOS PLATFORM_TOOLS bug** - Restore full cross-platform support
-2. **Fix library function conflicts** - Namespace functions to prevent overrides  
-3. **Fix registry parameter validation** - Clean up cosmetic warnings
+1. ✅ **Fix macOS PLATFORM_TOOLS bug** - Restored full cross-platform support
+2. ✅ **Fix library function conflicts** - Namespaced functions to prevent overrides  
+3. ✅ **Fix registry parameter validation** - Cleaned up cosmetic warnings
 
 #### **Enhancement Options**
 
@@ -93,6 +97,11 @@ These are **optional enhancements** for comprehensive testing coverage:
 - Template system for common scenarios
 - Support 32-bit Raspberry Pi OS
 - Parallel build support
+
+**Option 4: MCP Server**
+- Add MCP server for agent integration
+- Add MCP tools for image building
+- Add MCP tools for registry management
 
 ### 📊 **PROJECT METRICS**
 
