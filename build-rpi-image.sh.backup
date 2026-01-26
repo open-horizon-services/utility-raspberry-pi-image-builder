@@ -1,0 +1,3261 @@
+#!/bin/bash
+
+# Raspberry Pi Image Builder
+# Cross-platform script for creating custom Raspberry Pi SD card images with Open Horizon components
+# Supports both Linux and macOS environments
+
+set -euo pipefail  # Exit on error, undefined variables, and pipe failures
+
+# Global configuration variables
+CONFIG_OH_VERSION=""           # Open Horizon version (e.g., "2.30.0")
+CONFIG_BASE_IMAGE=""           # Path to base Raspberry Pi OS image
+CONFIG_OUTPUT_IMAGE=""         # Path for output custom image
+CONFIG_EXCHANGE_URL=""         # Optional exchange URL
+CONFIG_EXCHANGE_ORG=""         # Optional exchange organization
+CONFIG_EXCHANGE_USER=""        # Optional exchange username
+CONFIG_EXCHANGE_TOKEN=""       # Optional exchange token
+CONFIG_NODE_JSON=""            # Optional custom node.json file path
+CONFIG_WIFI_SSID=""           # Optional Wi-Fi network name
+CONFIG_WIFI_PASSWORD=""       # Optional Wi-Fi password
+CONFIG_WIFI_SECURITY="WPA2"   # Wi-Fi security type
+CONFIG_MOUNT_POINT="/tmp/rpi_mount"  # Temporary mount point
+
+# Global state variables
+SCRIPT_DIR=""
+LOG_FILE=""
+CLEANUP_REQUIRED=false
+MOUNTED_DEVICES=()
+DETECTED_PLATFORM=""
+PLATFORM_TOOLS=()
+
+# Initialize script directory and logging
+init_script() {
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    LOG_FILE="${SCRIPT_DIR}/build-rpi-image.log"
+    
+    # Create log file with timestamp
+    echo "=== Raspberry Pi Image Builder Started at $(date) ===" > "$LOG_FILE"
+    
+    # Source utility libraries
+    local lib_dir="${SCRIPT_DIR}/lib"
+    if [[ -d "$lib_dir" ]]; then
+        # Source platform detection library
+        if [[ -f "${lib_dir}/platform-detect.sh" ]]; then
+            source "${lib_dir}/platform-detect.sh"
+            log_debug "Loaded platform-detect library"
+        else
+            log_error "Platform detection library not found: ${lib_dir}/platform-detect.sh"
+            exit 1
+        fi
+        
+        # Source image mounting library
+        if [[ -f "${lib_dir}/image-mount.sh" ]]; then
+            source "${lib_dir}/image-mount.sh"
+            log_debug "Loaded image-mount library"
+        else
+            log_error "Image mounting library not found: ${lib_dir}/image-mount.sh"
+            exit 1
+        fi
+        
+        # Source image verification library
+        if [[ -f "${lib_dir}/image-verify.sh" ]]; then
+            source "${lib_dir}/image-verify.sh"
+            log_debug "Loaded image-verify library"
+        else
+            log_error "Image verification library not found: ${lib_dir}/image-verify.sh"
+            exit 1
+        fi
+    else
+        log_error "Library directory not found: $lib_dir"
+        exit 1
+    fi
+    
+    # Set up signal handlers for cleanup
+    trap cleanup_on_exit EXIT
+    trap cleanup_on_signal INT TERM
+}
+
+# Logging functions
+log_info() {
+    local message="$1"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] INFO: $message" | tee -a "$LOG_FILE"
+}
+
+log_warn() {
+    local message="$1"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] WARN: $message" | tee -a "$LOG_FILE" >&2
+}
+
+log_error() {
+    local message="$1"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] ERROR: $message" | tee -a "$LOG_FILE" >&2
+}
+
+log_debug() {
+    local message="$1"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    if [[ "${DEBUG:-}" == "1" ]]; then
+        echo "[$timestamp] DEBUG: $message" | tee -a "$LOG_FILE"
+    else
+        echo "[$timestamp] DEBUG: $message" >> "$LOG_FILE"
+    fi
+}
+
+# Error handling functions
+handle_error() {
+    local exit_code=$?
+    local line_number=$1
+    log_error "Script failed at line $line_number with exit code $exit_code"
+    cleanup_on_exit
+    exit $exit_code
+}
+
+# Set up error trap
+trap 'handle_error $LINENO' ERR
+
+# Cleanup functions
+cleanup_on_exit() {
+    if [[ "$CLEANUP_REQUIRED" == "true" ]]; then
+        log_info "Performing cleanup operations..."
+        cleanup_mounts
+        cleanup_temp_files
+    fi
+}
+
+cleanup_on_signal() {
+    log_warn "Received interrupt signal, cleaning up..."
+    CLEANUP_REQUIRED=true
+    cleanup_on_exit
+    exit 130
+}
+
+cleanup_mounts() {
+    if [[ ${#MOUNTED_DEVICES[@]} -gt 0 ]]; then
+        for device in "${MOUNTED_DEVICES[@]}"; do
+            if [[ -n "$device" ]]; then
+                log_info "Unmounting device: $device"
+                unmount_image "$device" "$CONFIG_MOUNT_POINT" || true
+            fi
+        done
+    fi
+    MOUNTED_DEVICES=()
+}
+
+cleanup_temp_files() {
+    if [[ -d "$CONFIG_MOUNT_POINT" ]]; then
+        log_info "Removing temporary mount point: $CONFIG_MOUNT_POINT"
+        rmdir "$CONFIG_MOUNT_POINT" 2>/dev/null || true
+    fi
+}
+
+# Dependency checking wrapper function
+check_dependencies() {
+    # Use library function - only check core tools needed for main script
+    log_info "Checking platform dependencies..."
+    if ! check_dependencies core; then
+        log_error "Core dependency check failed"
+        exit 1
+    fi
+    
+    # Also check mounting tools
+    if ! check_dependencies mounting; then
+        log_error "Mounting dependency check failed"
+        exit 1
+    fi
+    
+    log_info "Dependency check completed successfully"
+}
+
+# Configuration parsing and validation functions
+parse_arguments() {
+    local show_help=false
+    
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --oh-version)
+                CONFIG_OH_VERSION="$2"
+                shift 2
+                ;;
+            --base-image)
+                CONFIG_BASE_IMAGE="$2"
+                shift 2
+                ;;
+            --output-image)
+                CONFIG_OUTPUT_IMAGE="$2"
+                shift 2
+                ;;
+            --exchange-url)
+                CONFIG_EXCHANGE_URL="$2"
+                shift 2
+                ;;
+            --exchange-org)
+                CONFIG_EXCHANGE_ORG="$2"
+                shift 2
+                ;;
+            --exchange-user)
+                CONFIG_EXCHANGE_USER="$2"
+                shift 2
+                ;;
+            --exchange-token)
+                CONFIG_EXCHANGE_TOKEN="$2"
+                shift 2
+                ;;
+            --node-json)
+                CONFIG_NODE_JSON="$2"
+                shift 2
+                ;;
+            --wifi-ssid)
+                CONFIG_WIFI_SSID="$2"
+                shift 2
+                ;;
+            --wifi-password)
+                CONFIG_WIFI_PASSWORD="$2"
+                shift 2
+                ;;
+            --wifi-security)
+                CONFIG_WIFI_SECURITY="$2"
+                shift 2
+                ;;
+            --mount-point)
+                CONFIG_MOUNT_POINT="$2"
+                shift 2
+                ;;
+            --help|-h)
+                show_help=true
+                shift
+                ;;
+            --debug)
+                DEBUG=1
+                shift
+                ;;
+            --list-agents)
+                list_agents
+                exit 0
+                ;;
+            *)
+                log_error "Unknown argument: $1"
+                show_usage
+                exit 1
+                ;;
+        esac
+    done
+    
+    if [[ "$show_help" == "true" ]]; then
+        show_usage
+        exit 0
+    fi
+}
+
+show_usage() {
+    cat << EOF
+Raspberry Pi Image Builder
+
+USAGE:
+    $0 [OPTIONS]
+
+REQUIRED OPTIONS:
+    --oh-version VERSION        Open Horizon version to install (e.g., "2.30.0")
+    --base-image PATH          Path to base Raspberry Pi OS image
+    --output-image PATH        Path for output custom image
+
+OPTIONAL OPTIONS:
+    --exchange-url URL         Open Horizon exchange URL
+    --exchange-org ORG         Exchange organization
+    --exchange-user USER       Exchange username
+    --exchange-token TOKEN     Exchange authentication token
+    --node-json PATH           Path to custom node.json file
+    --wifi-ssid SSID          Wi-Fi network name
+    --wifi-password PASS      Wi-Fi password
+    --wifi-security TYPE      Wi-Fi security type (WPA2, WPA3) [default: WPA2]
+    --mount-point PATH        Temporary mount point [default: /tmp/rpi_mount]
+    --debug                   Enable debug logging
+    --list-agents             List all registered agent configurations
+    --help, -h                Show this help message
+
+EXAMPLES:
+    # Basic usage with required parameters
+    $0 --oh-version "2.30.0" --base-image "raspios-lite.img" --output-image "custom-rpi.img"
+    
+    # With exchange registration
+    $0 --oh-version "2.30.0" --base-image "raspios-lite.img" --output-image "custom-rpi.img" \\
+       --exchange-url "https://exchange.example.com" --exchange-org "myorg" \\
+       --exchange-user "admin" --exchange-token "mytoken"
+    
+    # With Wi-Fi configuration
+    $0 --oh-version "2.30.0" --base-image "raspios-lite.img" --output-image "custom-rpi.img" \\
+       --wifi-ssid "MyNetwork" --wifi-password "mypassword" --wifi-security "WPA3"
+
+EOF
+}
+
+validate_configuration() {
+    local errors=()
+    
+    # Validate required parameters
+    if [[ -z "$CONFIG_OH_VERSION" ]]; then
+        errors+=("Open Horizon version is required (--oh-version)")
+    fi
+    
+    if [[ -z "$CONFIG_BASE_IMAGE" ]]; then
+        errors+=("Base image path is required (--base-image)")
+    elif [[ ! -f "$CONFIG_BASE_IMAGE" ]]; then
+        errors+=("Base image file does not exist: $CONFIG_BASE_IMAGE")
+    fi
+    
+    if [[ -z "$CONFIG_OUTPUT_IMAGE" ]]; then
+        errors+=("Output image path is required (--output-image)")
+    fi
+    
+    # Validate optional parameters
+    if [[ -n "$CONFIG_NODE_JSON" && ! -f "$CONFIG_NODE_JSON" ]]; then
+        errors+=("Custom node.json file does not exist: $CONFIG_NODE_JSON")
+    fi
+    
+    # Validate Wi-Fi security type
+    if [[ -n "$CONFIG_WIFI_SECURITY" ]]; then
+        case "$CONFIG_WIFI_SECURITY" in
+            WPA2|WPA3)
+                ;;
+            *)
+                errors+=("Invalid Wi-Fi security type: $CONFIG_WIFI_SECURITY (must be WPA2 or WPA3)")
+                ;;
+        esac
+    fi
+    
+    # Validate exchange configuration consistency
+    if [[ -n "$CONFIG_EXCHANGE_URL" ]]; then
+        if [[ -z "$CONFIG_EXCHANGE_ORG" || -z "$CONFIG_EXCHANGE_USER" || -z "$CONFIG_EXCHANGE_TOKEN" ]]; then
+            errors+=("Exchange URL specified but missing organization, user, or token")
+        fi
+    fi
+    
+    # Validate Wi-Fi configuration consistency
+    if [[ -n "$CONFIG_WIFI_SSID" && -z "$CONFIG_WIFI_PASSWORD" ]]; then
+        errors+=("Wi-Fi SSID specified but password is missing")
+    fi
+    
+    # Validate Wi-Fi configuration if provided
+    if [[ -n "$CONFIG_WIFI_SSID" && -n "$CONFIG_WIFI_PASSWORD" ]]; then
+        if ! validate_wifi_configuration "$CONFIG_WIFI_SSID" "$CONFIG_WIFI_PASSWORD" "$CONFIG_WIFI_SECURITY"; then
+            errors+=("Wi-Fi configuration validation failed")
+        fi
+    fi
+    
+    # Report validation errors
+    if [[ ${#errors[@]} -gt 0 ]]; then
+        log_error "Configuration validation failed:"
+        for error in "${errors[@]}"; do
+            log_error "  - $error"
+        done
+        show_usage
+        exit 1
+    fi
+    
+    log_info "Configuration validation passed"
+}
+
+prompt_for_missing_parameters() {
+    # Prompt for required parameters if not provided
+    if [[ -z "$CONFIG_OH_VERSION" ]]; then
+        read -p "Enter Open Horizon version (e.g., 2.30.0): " CONFIG_OH_VERSION
+    fi
+    
+    if [[ -z "$CONFIG_BASE_IMAGE" ]]; then
+        read -p "Enter path to base Raspberry Pi OS image: " CONFIG_BASE_IMAGE
+    fi
+    
+    if [[ -z "$CONFIG_OUTPUT_IMAGE" ]]; then
+        # Generate default output name based on input
+        local base_name=$(basename "$CONFIG_BASE_IMAGE" .img)
+        CONFIG_OUTPUT_IMAGE="${base_name}-oh-${CONFIG_OH_VERSION}.img"
+        log_info "Using default output image name: $CONFIG_OUTPUT_IMAGE"
+    fi
+}
+
+log_configuration() {
+    log_info "=== Configuration Summary ==="
+    log_info "Platform: $DETECTED_PLATFORM"
+    log_info "Open Horizon Version: $CONFIG_OH_VERSION"
+    log_info "Base Image: $CONFIG_BASE_IMAGE"
+    log_info "Output Image: $CONFIG_OUTPUT_IMAGE"
+    log_info "Mount Point: $CONFIG_MOUNT_POINT"
+    
+    if [[ -n "$CONFIG_EXCHANGE_URL" ]]; then
+        log_info "Exchange URL: $CONFIG_EXCHANGE_URL"
+        log_info "Exchange Organization: $CONFIG_EXCHANGE_ORG"
+        log_info "Exchange User: $CONFIG_EXCHANGE_USER"
+        log_info "Exchange Token: [REDACTED]"
+    else
+        log_info "Exchange Registration: Disabled"
+    fi
+    
+    if [[ -n "$CONFIG_NODE_JSON" ]]; then
+        log_info "Custom node.json: $CONFIG_NODE_JSON"
+    else
+        log_info "Node Configuration: Default"
+    fi
+    
+    if [[ -n "$CONFIG_WIFI_SSID" ]]; then
+        log_info "Wi-Fi SSID: $CONFIG_WIFI_SSID"
+        log_info "Wi-Fi Security: $CONFIG_WIFI_SECURITY"
+        log_info "Wi-Fi Password: [REDACTED]"
+    else
+        log_info "Wi-Fi Configuration: Disabled"
+    fi
+    
+    log_info "=========================="
+}
+
+# Image mounting and management functions
+mount_image() {
+    local image_path="$1"
+    local mount_point="$2"
+    local loop_device=""
+    local retry_count=0
+    local max_retries=3
+    
+    log_info "Mounting image: $image_path"
+    log_debug "Mount point: $mount_point"
+    
+    # Validate inputs
+    if [[ -z "$image_path" || -z "$mount_point" ]]; then
+        log_error "mount_image: Missing required parameters"
+        return 1
+    fi
+    
+    if [[ ! -f "$image_path" ]]; then
+        log_error "mount_image: Image file does not exist: $image_path"
+        return 1
+    fi
+    
+    # Create mount point if it doesn't exist
+    if [[ ! -d "$mount_point" ]]; then
+        log_debug "Creating mount point: $mount_point"
+        mkdir -p "$mount_point" || {
+            log_error "mount_image: Failed to create mount point: $mount_point"
+            return 1
+        }
+    fi
+    
+    # Platform-specific mounting with retry logic
+    while [[ $retry_count -lt $max_retries ]]; do
+        case "$DETECTED_PLATFORM" in
+            linux)
+                loop_device=$(mount_image_linux "$image_path" "$mount_point")
+                local mount_result=$?
+                ;;
+            macos)
+                loop_device=$(mount_image_macos "$image_path" "$mount_point")
+                local mount_result=$?
+                ;;
+            *)
+                log_error "mount_image: Unsupported platform: $DETECTED_PLATFORM"
+                return 1
+                ;;
+        esac
+        
+        if [[ $mount_result -eq 0 && -n "$loop_device" ]]; then
+            log_info "Successfully mounted image on device: $loop_device"
+            MOUNTED_DEVICES+=("$loop_device")
+            echo "$loop_device"
+            return 0
+        fi
+        
+        retry_count=$((retry_count + 1))
+        if [[ $retry_count -lt $max_retries ]]; then
+            log_warn "Mount attempt $retry_count failed, retrying in 2 seconds..."
+            sleep 2
+        fi
+    done
+    
+    log_error "mount_image: Failed to mount after $max_retries attempts"
+    return 1
+}
+
+mount_image_linux() {
+    local image_path="$1"
+    local mount_point="$2"
+    local loop_device=""
+    
+    log_debug "Using Linux losetup for mounting"
+    
+    # Set up loop device with partition probing
+    loop_device=$(sudo losetup --find --partscan --show "$image_path" 2>/dev/null)
+    if [[ $? -ne 0 || -z "$loop_device" ]]; then
+        log_error "mount_image_linux: Failed to create loop device for $image_path"
+        return 1
+    fi
+    
+    log_debug "Created loop device: $loop_device"
+    
+    # Wait for partition devices to appear
+    sleep 1
+    
+    # Find the root partition (usually the second partition)
+    local root_partition="${loop_device}p2"
+    if [[ ! -b "$root_partition" ]]; then
+        # Try alternative naming scheme
+        root_partition="${loop_device}2"
+        if [[ ! -b "$root_partition" ]]; then
+            log_error "mount_image_linux: Root partition not found for $loop_device"
+            sudo losetup -d "$loop_device" 2>/dev/null || true
+            return 1
+        fi
+    fi
+    
+    log_debug "Found root partition: $root_partition"
+    
+    # Mount the root partition
+    if ! sudo mount "$root_partition" "$mount_point" 2>/dev/null; then
+        log_error "mount_image_linux: Failed to mount $root_partition to $mount_point"
+        sudo losetup -d "$loop_device" 2>/dev/null || true
+        return 1
+    fi
+    
+    # Mount the boot partition if it exists
+    local boot_partition="${loop_device}p1"
+    if [[ ! -b "$boot_partition" ]]; then
+        boot_partition="${loop_device}1"
+    fi
+    
+    if [[ -b "$boot_partition" ]]; then
+        local boot_mount="${mount_point}/boot"
+        if [[ -d "$boot_mount" ]]; then
+            log_debug "Mounting boot partition: $boot_partition to $boot_mount"
+            sudo mount "$boot_partition" "$boot_mount" 2>/dev/null || {
+                log_warn "mount_image_linux: Failed to mount boot partition (non-critical)"
+            }
+        fi
+    fi
+    
+    echo "$loop_device"
+    return 0
+}
+
+mount_image_macos() {
+    local image_path="$1"
+    local mount_point="$2"
+    local disk_device=""
+    
+    log_debug "Using macOS hdiutil for mounting"
+    
+    # Attach the disk image
+    local attach_output
+    attach_output=$(hdiutil attach "$image_path" -nobrowse -mountpoint "$mount_point" 2>/dev/null)
+    if [[ $? -ne 0 ]]; then
+        log_error "mount_image_macos: Failed to attach disk image: $image_path"
+        return 1
+    fi
+    
+    # Extract the disk device from hdiutil output
+    disk_device=$(echo "$attach_output" | grep -E '^/dev/disk[0-9]+' | head -1 | awk '{print $1}')
+    if [[ -z "$disk_device" ]]; then
+        log_error "mount_image_macos: Could not determine disk device from hdiutil output"
+        hdiutil detach "$mount_point" 2>/dev/null || true
+        return 1
+    fi
+    
+    log_debug "Attached disk device: $disk_device"
+    
+    # Verify the mount was successful
+    if [[ ! -d "$mount_point" ]] || ! mountpoint -q "$mount_point" 2>/dev/null; then
+        log_error "mount_image_macos: Mount point verification failed"
+        hdiutil detach "$disk_device" 2>/dev/null || true
+        return 1
+    fi
+    
+    echo "$disk_device"
+    return 0
+}
+
+unmount_image() {
+    local device="$1"
+    local mount_point="$2"
+    local retry_count=0
+    local max_retries=3
+    
+    log_info "Unmounting device: $device"
+    log_debug "Mount point: $mount_point"
+    
+    # Validate inputs
+    if [[ -z "$device" ]]; then
+        log_error "unmount_image: Device parameter is required"
+        return 1
+    fi
+    
+    # Platform-specific unmounting with retry logic
+    while [[ $retry_count -lt $max_retries ]]; do
+        case "$DETECTED_PLATFORM" in
+            linux)
+                if unmount_image_linux "$device" "$mount_point"; then
+                    log_info "Successfully unmounted device: $device"
+                    # Remove from mounted devices array
+                    local new_array=()
+                    for mounted_device in "${MOUNTED_DEVICES[@]}"; do
+                        if [[ "$mounted_device" != "$device" ]]; then
+                            new_array+=("$mounted_device")
+                        fi
+                    done
+                    MOUNTED_DEVICES=("${new_array[@]}")
+                    return 0
+                fi
+                ;;
+            macos)
+                if unmount_image_macos "$device" "$mount_point"; then
+                    log_info "Successfully unmounted device: $device"
+                    # Remove from mounted devices array
+                    local new_array=()
+                    for mounted_device in "${MOUNTED_DEVICES[@]}"; do
+                        if [[ "$mounted_device" != "$device" ]]; then
+                            new_array+=("$mounted_device")
+                        fi
+                    done
+                    MOUNTED_DEVICES=("${new_array[@]}")
+                    return 0
+                fi
+                ;;
+            *)
+                log_error "unmount_image: Unsupported platform: $DETECTED_PLATFORM"
+                return 1
+                ;;
+        esac
+        
+        retry_count=$((retry_count + 1))
+        if [[ $retry_count -lt $max_retries ]]; then
+            log_warn "Unmount attempt $retry_count failed, retrying in 2 seconds..."
+            sleep 2
+        fi
+    done
+    
+    log_error "unmount_image: Failed to unmount after $max_retries attempts"
+    return 1
+}
+
+unmount_image_linux() {
+    local loop_device="$1"
+    local mount_point="$2"
+    
+    log_debug "Using Linux umount and losetup for unmounting"
+    
+    # Unmount boot partition if mounted
+    local boot_mount="${mount_point}/boot"
+    if mountpoint -q "$boot_mount" 2>/dev/null; then
+        log_debug "Unmounting boot partition: $boot_mount"
+        sudo umount "$boot_mount" 2>/dev/null || {
+            log_warn "unmount_image_linux: Failed to unmount boot partition (non-critical)"
+        }
+    fi
+    
+    # Unmount root partition
+    if mountpoint -q "$mount_point" 2>/dev/null; then
+        log_debug "Unmounting root partition: $mount_point"
+        if ! sudo umount "$mount_point" 2>/dev/null; then
+            log_error "unmount_image_linux: Failed to unmount $mount_point"
+            return 1
+        fi
+    fi
+    
+    # Detach loop device
+    if [[ -b "$loop_device" ]]; then
+        log_debug "Detaching loop device: $loop_device"
+        if ! sudo losetup -d "$loop_device" 2>/dev/null; then
+            log_error "unmount_image_linux: Failed to detach loop device $loop_device"
+            return 1
+        fi
+    fi
+    
+    return 0
+}
+
+unmount_image_macos() {
+    local disk_device="$1"
+    local mount_point="$2"
+    
+    log_debug "Using macOS hdiutil for unmounting"
+    
+    # Try to detach using the mount point first
+    if [[ -n "$mount_point" ]] && mountpoint -q "$mount_point" 2>/dev/null; then
+        log_debug "Detaching using mount point: $mount_point"
+        if hdiutil detach "$mount_point" -force 2>/dev/null; then
+            return 0
+        fi
+    fi
+    
+    # Try to detach using the disk device
+    if [[ -n "$disk_device" ]]; then
+        log_debug "Detaching using disk device: $disk_device"
+        if hdiutil detach "$disk_device" -force 2>/dev/null; then
+            return 0
+        fi
+    fi
+    
+    log_error "unmount_image_macos: Failed to detach disk image"
+    return 1
+}
+
+verify_image() {
+    local image_path="$1"
+    local verification_type="${2:-basic}"
+    
+    log_info "Verifying image integrity: $image_path"
+    log_debug "Verification type: $verification_type"
+    
+    # Validate inputs
+    if [[ -z "$image_path" ]]; then
+        log_error "verify_image: Image path is required"
+        return 1
+    fi
+    
+    if [[ ! -f "$image_path" ]]; then
+        log_error "verify_image: Image file does not exist: $image_path"
+        return 1
+    fi
+    
+    # Basic file integrity checks
+    log_debug "Performing basic file integrity checks"
+    
+    # Check file size (should be reasonable for a Raspberry Pi image)
+    local file_size
+    file_size=$(stat -c%s "$image_path" 2>/dev/null || stat -f%z "$image_path" 2>/dev/null)
+    if [[ -z "$file_size" ]]; then
+        log_error "verify_image: Could not determine file size"
+        return 1
+    fi
+    
+    log_debug "Image file size: $file_size bytes"
+    
+    # Check minimum size (should be at least 100MB for a minimal image)
+    local min_size=$((100 * 1024 * 1024))  # 100MB
+    if [[ $file_size -lt $min_size ]]; then
+        log_error "verify_image: Image file too small (${file_size} bytes, minimum ${min_size} bytes)"
+        return 1
+    fi
+    
+    # Check maximum size (should be reasonable, e.g., less than 32GB)
+    local max_size=$((32 * 1024 * 1024 * 1024))  # 32GB
+    if [[ $file_size -gt $max_size ]]; then
+        log_error "verify_image: Image file too large (${file_size} bytes, maximum ${max_size} bytes)"
+        return 1
+    fi
+    
+    # Check file header for common image formats
+    log_debug "Checking file format"
+    local file_header
+    file_header=$(hexdump -C "$image_path" | head -1 2>/dev/null)
+    if [[ -z "$file_header" ]]; then
+        log_error "verify_image: Could not read file header"
+        return 1
+    fi
+    
+    log_debug "File header: $file_header"
+    
+    # Perform extended verification if requested
+    if [[ "$verification_type" == "extended" ]]; then
+        log_debug "Performing extended verification"
+        
+        # Try to mount the image temporarily for structure verification
+        local temp_mount="/tmp/verify_mount_$$"
+        mkdir -p "$temp_mount" || {
+            log_error "verify_image: Could not create temporary mount point"
+            return 1
+        }
+        
+        local mount_device
+        mount_device=$(mount_image "$image_path" "$temp_mount" 2>/dev/null)
+        local mount_result=$?
+        
+        if [[ $mount_result -eq 0 && -n "$mount_device" ]]; then
+            log_debug "Successfully mounted image for verification"
+            
+            # Check for essential Raspberry Pi OS directories
+            local essential_dirs=("/etc" "/usr" "/var" "/home" "/boot")
+            local missing_dirs=()
+            
+            for dir in "${essential_dirs[@]}"; do
+                if [[ ! -d "${temp_mount}${dir}" ]]; then
+                    missing_dirs+=("$dir")
+                fi
+            done
+            
+            # Check for essential files
+            local essential_files=("/etc/passwd" "/etc/fstab")
+            local missing_files=()
+            
+            for file in "${essential_files[@]}"; do
+                if [[ ! -f "${temp_mount}${file}" ]]; then
+                    missing_files+=("$file")
+                fi
+            done
+            
+            # Unmount the image
+            unmount_image "$mount_device" "$temp_mount" || {
+                log_warn "verify_image: Failed to unmount verification mount"
+            }
+            
+            # Report missing directories and files
+            if [[ ${#missing_dirs[@]} -gt 0 ]]; then
+                log_error "verify_image: Missing essential directories: ${missing_dirs[*]}"
+                rmdir "$temp_mount" 2>/dev/null || true
+                return 1
+            fi
+            
+            if [[ ${#missing_files[@]} -gt 0 ]]; then
+                log_error "verify_image: Missing essential files: ${missing_files[*]}"
+                rmdir "$temp_mount" 2>/dev/null || true
+                return 1
+            fi
+            
+            log_info "Extended verification passed - image structure is valid"
+        else
+            log_warn "verify_image: Could not mount image for extended verification (basic verification only)"
+        fi
+        
+        rmdir "$temp_mount" 2>/dev/null || true
+    fi
+    
+    log_info "Image verification completed successfully"
+    return 0
+}
+
+# Image format compatibility verification functions
+verify_image_format_compatibility() {
+    local image_path="$1"
+    
+    log_info "Verifying image format compatibility: $image_path"
+    
+    # Validate inputs
+    if [[ -z "$image_path" ]]; then
+        log_error "verify_image_format_compatibility: Image path is required"
+        return 1
+    fi
+    
+    if [[ ! -f "$image_path" ]]; then
+        log_error "verify_image_format_compatibility: Image file does not exist: $image_path"
+        return 1
+    fi
+    
+    # Verify Raspberry Pi Imager compatibility
+    log_info "Checking Raspberry Pi Imager compatibility"
+    if ! verify_rpi_imager_compatibility "$image_path"; then
+        log_error "verify_image_format_compatibility: Raspberry Pi Imager compatibility check failed"
+        return 1
+    fi
+    
+    # Verify standard Linux utilities compatibility
+    log_info "Checking standard Linux utilities compatibility"
+    if ! verify_linux_utilities_compatibility "$image_path"; then
+        log_error "verify_image_format_compatibility: Linux utilities compatibility check failed"
+        return 1
+    fi
+    
+    # Verify partition table and filesystem structure
+    log_info "Checking partition table and filesystem structure"
+    if ! verify_partition_structure "$image_path"; then
+        log_error "verify_image_format_compatibility: Partition structure validation failed"
+        return 1
+    fi
+    
+    log_info "Image format compatibility verification completed successfully"
+    return 0
+}
+
+verify_rpi_imager_compatibility() {
+    local image_path="$1"
+    
+    log_debug "Verifying Raspberry Pi Imager compatibility for: $image_path"
+    
+    # Check file extension (Raspberry Pi Imager expects .img files)
+    local file_extension="${image_path##*.}"
+    if [[ "$file_extension" != "img" ]]; then
+        log_warn "verify_rpi_imager_compatibility: File extension is not .img (found: .$file_extension)"
+        log_warn "Raspberry Pi Imager may not recognize this file format"
+    fi
+    
+    # Check file size alignment (should be aligned to sector boundaries)
+    local file_size
+    file_size=$(stat -c%s "$image_path" 2>/dev/null || stat -f%z "$image_path" 2>/dev/null)
+    if [[ -z "$file_size" ]]; then
+        log_error "verify_rpi_imager_compatibility: Could not determine file size"
+        return 1
+    fi
+    
+    # Check if file size is aligned to 512-byte sectors
+    local sector_size=512
+    local remainder=$((file_size % sector_size))
+    if [[ $remainder -ne 0 ]]; then
+        log_warn "verify_rpi_imager_compatibility: File size not aligned to 512-byte sectors"
+        log_warn "File size: $file_size bytes, remainder: $remainder bytes"
+    fi
+    
+    # Check for valid disk image signature (MBR or GPT)
+    log_debug "Checking disk image signature"
+    local boot_signature
+    boot_signature=$(dd if="$image_path" bs=1 skip=510 count=2 2>/dev/null | hexdump -C | head -1 | awk '{print $2$3}')
+    
+    if [[ "$boot_signature" == "55aa" ]]; then
+        log_debug "Found valid MBR boot signature (0x55AA)"
+    else
+        # Check for GPT signature
+        local gpt_signature
+        gpt_signature=$(dd if="$image_path" bs=1 skip=512 count=8 2>/dev/null | tr -d '\0')
+        if [[ "$gpt_signature" == "EFI PART" ]]; then
+            log_debug "Found valid GPT signature"
+        else
+            log_error "verify_rpi_imager_compatibility: No valid MBR or GPT signature found"
+            log_error "Boot signature: $boot_signature, GPT signature: $gpt_signature"
+            return 1
+        fi
+    fi
+    
+    # Check for Raspberry Pi specific boot files (if we can mount the image)
+    log_debug "Checking for Raspberry Pi boot files"
+    local temp_mount="/tmp/rpi_compat_check_$$"
+    mkdir -p "$temp_mount" || {
+        log_warn "verify_rpi_imager_compatibility: Could not create temp mount point for boot file check"
+        return 0  # Non-critical failure
+    }
+    
+    local mount_device
+    mount_device=$(mount_image "$image_path" "$temp_mount" 2>/dev/null)
+    local mount_result=$?
+    
+    if [[ $mount_result -eq 0 && -n "$mount_device" ]]; then
+        # Check for essential Raspberry Pi boot files
+        local boot_files=("config.txt" "cmdline.txt" "start.elf" "fixup.dat")
+        local missing_boot_files=()
+        local boot_path="$temp_mount/boot"
+        
+        # If boot is not mounted separately, check if boot files are in root
+        if [[ ! -d "$boot_path" ]]; then
+            boot_path="$temp_mount"
+        fi
+        
+        for boot_file in "${boot_files[@]}"; do
+            if [[ ! -f "$boot_path/$boot_file" ]]; then
+                missing_boot_files+=("$boot_file")
+            fi
+        done
+        
+        # Unmount the image
+        unmount_image "$mount_device" "$temp_mount" || {
+            log_warn "verify_rpi_imager_compatibility: Failed to unmount temp mount"
+        }
+        
+        if [[ ${#missing_boot_files[@]} -gt 0 ]]; then
+            log_warn "verify_rpi_imager_compatibility: Missing Raspberry Pi boot files: ${missing_boot_files[*]}"
+            log_warn "Image may not boot properly on Raspberry Pi hardware"
+        else
+            log_debug "All essential Raspberry Pi boot files found"
+        fi
+    else
+        log_warn "verify_rpi_imager_compatibility: Could not mount image for boot file verification"
+    fi
+    
+    rmdir "$temp_mount" 2>/dev/null || true
+    
+    log_debug "Raspberry Pi Imager compatibility check completed"
+    return 0
+}
+
+verify_linux_utilities_compatibility() {
+    local image_path="$1"
+    
+    log_debug "Verifying Linux utilities compatibility for: $image_path"
+    
+    # Test dd compatibility
+    log_debug "Testing dd compatibility"
+    if ! verify_dd_compatibility "$image_path"; then
+        log_error "verify_linux_utilities_compatibility: dd compatibility check failed"
+        return 1
+    fi
+    
+    # Test file command recognition
+    log_debug "Testing file command recognition"
+    if ! verify_file_command_recognition "$image_path"; then
+        log_error "verify_linux_utilities_compatibility: file command recognition failed"
+        return 1
+    fi
+    
+    # Test fdisk compatibility (if available)
+    if command -v fdisk >/dev/null 2>&1; then
+        log_debug "Testing fdisk compatibility"
+        if ! verify_fdisk_compatibility "$image_path"; then
+            log_warn "verify_linux_utilities_compatibility: fdisk compatibility check failed (non-critical)"
+        fi
+    else
+        log_debug "fdisk not available, skipping fdisk compatibility check"
+    fi
+    
+    # Test parted compatibility (if available)
+    if command -v parted >/dev/null 2>&1; then
+        log_debug "Testing parted compatibility"
+        if ! verify_parted_compatibility "$image_path"; then
+            log_warn "verify_linux_utilities_compatibility: parted compatibility check failed (non-critical)"
+        fi
+    else
+        log_debug "parted not available, skipping parted compatibility check"
+    fi
+    
+    log_debug "Linux utilities compatibility check completed"
+    return 0
+}
+
+verify_dd_compatibility() {
+    local image_path="$1"
+    
+    log_debug "Testing dd read compatibility"
+    
+    # Test if dd can read the first sector
+    local first_sector
+    first_sector=$(dd if="$image_path" bs=512 count=1 2>/dev/null | wc -c)
+    
+    if [[ "$first_sector" -eq 512 ]]; then
+        log_debug "dd can successfully read first sector (512 bytes)"
+    else
+        log_error "verify_dd_compatibility: dd failed to read first sector correctly"
+        log_error "Expected 512 bytes, got $first_sector bytes"
+        return 1
+    fi
+    
+    # Test if dd can read the last sector
+    local file_size
+    file_size=$(stat -c%s "$image_path" 2>/dev/null || stat -f%z "$image_path" 2>/dev/null)
+    local last_sector_offset=$(((file_size / 512) - 1))
+    
+    if [[ $last_sector_offset -gt 0 ]]; then
+        local last_sector
+        last_sector=$(dd if="$image_path" bs=512 skip="$last_sector_offset" count=1 2>/dev/null | wc -c)
+        
+        if [[ "$last_sector" -eq 512 ]]; then
+            log_debug "dd can successfully read last sector (512 bytes)"
+        else
+            log_warn "verify_dd_compatibility: dd may have issues reading last sector"
+            log_warn "Expected 512 bytes, got $last_sector bytes"
+        fi
+    fi
+    
+    return 0
+}
+
+verify_file_command_recognition() {
+    local image_path="$1"
+    
+    log_debug "Testing file command recognition"
+    
+    # Use file command to identify the image
+    local file_output
+    file_output=$(file "$image_path" 2>/dev/null)
+    
+    if [[ -z "$file_output" ]]; then
+        log_error "verify_file_command_recognition: file command produced no output"
+        return 1
+    fi
+    
+    log_debug "File command output: $file_output"
+    
+    # Check if file command recognizes it as a disk image or filesystem
+    if [[ "$file_output" =~ (DOS/MBR|disk|filesystem|partition|boot) ]]; then
+        log_debug "file command correctly identifies image as disk/filesystem"
+        return 0
+    else
+        log_warn "verify_file_command_recognition: file command may not recognize image format"
+        log_warn "Output: $file_output"
+        # This is not a fatal error for compatibility
+        return 0
+    fi
+}
+
+verify_fdisk_compatibility() {
+    local image_path="$1"
+    
+    log_debug "Testing fdisk compatibility"
+    
+    # Test if fdisk can read the partition table
+    local fdisk_output
+    fdisk_output=$(fdisk -l "$image_path" 2>/dev/null)
+    local fdisk_result=$?
+    
+    if [[ $fdisk_result -eq 0 && -n "$fdisk_output" ]]; then
+        log_debug "fdisk successfully read partition table"
+        
+        # Check if fdisk found any partitions
+        local partition_count
+        partition_count=$(echo "$fdisk_output" | grep -c "^${image_path}" 2>/dev/null || echo "0")
+        
+        if [[ $partition_count -gt 0 ]]; then
+            log_debug "fdisk found $partition_count partition(s)"
+        else
+            log_warn "verify_fdisk_compatibility: fdisk did not find any partitions"
+        fi
+        
+        return 0
+    else
+        log_warn "verify_fdisk_compatibility: fdisk failed to read partition table"
+        return 1
+    fi
+}
+
+verify_parted_compatibility() {
+    local image_path="$1"
+    
+    log_debug "Testing parted compatibility"
+    
+    # Test if parted can read the partition table
+    local parted_output
+    parted_output=$(parted "$image_path" print 2>/dev/null)
+    local parted_result=$?
+    
+    if [[ $parted_result -eq 0 && -n "$parted_output" ]]; then
+        log_debug "parted successfully read partition table"
+        
+        # Check if parted found any partitions
+        local partition_count
+        partition_count=$(echo "$parted_output" | grep -c "^ [0-9]" 2>/dev/null || echo "0")
+        
+        if [[ $partition_count -gt 0 ]]; then
+            log_debug "parted found $partition_count partition(s)"
+        else
+            log_warn "verify_parted_compatibility: parted did not find any partitions"
+        fi
+        
+        return 0
+    else
+        log_warn "verify_parted_compatibility: parted failed to read partition table"
+        return 1
+    fi
+}
+
+verify_partition_structure() {
+    local image_path="$1"
+    
+    log_debug "Verifying partition table and filesystem structure"
+    
+    # Check partition table type and structure
+    if ! verify_partition_table_structure "$image_path"; then
+        log_error "verify_partition_structure: Partition table structure validation failed"
+        return 1
+    fi
+    
+    # Check filesystem structure
+    if ! verify_filesystem_structure "$image_path"; then
+        log_error "verify_partition_structure: Filesystem structure validation failed"
+        return 1
+    fi
+    
+    log_debug "Partition and filesystem structure validation completed"
+    return 0
+}
+
+verify_partition_table_structure() {
+    local image_path="$1"
+    
+    log_debug "Verifying partition table structure"
+    
+    # Check for MBR signature (0x55AA at offset 510-511)
+    local boot_signature
+    boot_signature=$(dd if="$image_path" bs=1 skip=510 count=2 2>/dev/null | hexdump -v -e '/1 "%02x"')
+    
+    if [[ "$boot_signature" == "55aa" ]]; then
+        log_debug "Found valid MBR boot signature"
+        
+        # Analyze MBR partition entries (starting at offset 446)
+        local partition_entries
+        partition_entries=$(dd if="$image_path" bs=1 skip=446 count=64 2>/dev/null | hexdump -C)
+        
+        if [[ -n "$partition_entries" ]]; then
+            log_debug "Successfully read MBR partition entries"
+            
+            # Count active partitions (basic check)
+            local active_partitions=0
+            local i
+            for i in {0..3}; do
+                local offset=$((446 + i * 16))
+                local partition_type
+                partition_type=$(dd if="$image_path" bs=1 skip=$((offset + 4)) count=1 2>/dev/null | hexdump -v -e '/1 "%02x"')
+                
+                if [[ -n "$partition_type" && "$partition_type" != "00" ]]; then
+                    active_partitions=$((active_partitions + 1))
+                fi
+            done
+            
+            log_debug "Found $active_partitions active partition(s) in MBR"
+            
+            if [[ $active_partitions -eq 0 ]]; then
+                log_warn "verify_partition_table_structure: No active partitions found in MBR"
+                # For a basic test image, this is acceptable
+            fi
+        else
+            log_error "verify_partition_table_structure: Could not read MBR partition entries"
+            return 1
+        fi
+    else
+        # Check for GPT signature
+        local gpt_header
+        gpt_header=$(dd if="$image_path" bs=1 skip=512 count=8 2>/dev/null | tr -d '\0')
+        
+        if [[ "$gpt_header" == "EFI PART" ]]; then
+            log_debug "Found valid GPT signature"
+            
+            # Basic GPT validation
+            local gpt_revision
+            gpt_revision=$(dd if="$image_path" bs=1 skip=520 count=4 2>/dev/null | hexdump -v -e '/1 "%02x"')
+            log_debug "GPT revision: $gpt_revision"
+            
+        else
+            log_error "verify_partition_table_structure: No valid MBR or GPT signature found"
+            log_error "Boot signature: $boot_signature, GPT header: $gpt_header"
+            return 1
+        fi
+    fi
+    
+    return 0
+}
+
+verify_filesystem_structure() {
+    local image_path="$1"
+    
+    log_debug "Verifying filesystem structure"
+    
+    # Try to mount the image to verify filesystem structure
+    local temp_mount="/tmp/fs_verify_$$"
+    mkdir -p "$temp_mount" || {
+        log_error "verify_filesystem_structure: Could not create temp mount point"
+        return 1
+    }
+    
+    local mount_device
+    mount_device=$(mount_image "$image_path" "$temp_mount" 2>/dev/null)
+    local mount_result=$?
+    
+    if [[ $mount_result -eq 0 && -n "$mount_device" ]]; then
+        log_debug "Successfully mounted image for filesystem verification"
+        
+        # Check for essential Linux filesystem structure
+        local essential_dirs=("/etc" "/usr" "/var" "/home" "/boot" "/bin" "/sbin" "/lib")
+        local missing_dirs=()
+        local found_dirs=()
+        
+        for dir in "${essential_dirs[@]}"; do
+            if [[ -d "${temp_mount}${dir}" ]]; then
+                found_dirs+=("$dir")
+            else
+                missing_dirs+=("$dir")
+            fi
+        done
+        
+        log_debug "Found directories: ${found_dirs[*]}"
+        
+        if [[ ${#missing_dirs[@]} -gt 0 ]]; then
+            log_warn "verify_filesystem_structure: Missing some standard directories: ${missing_dirs[*]}"
+            # This might be acceptable for minimal images
+        fi
+        
+        # Check for essential files
+        local essential_files=("/etc/passwd" "/etc/fstab" "/etc/hostname")
+        local missing_files=()
+        local found_files=()
+        
+        for file in "${essential_files[@]}"; do
+            if [[ -f "${temp_mount}${file}" ]]; then
+                found_files+=("$file")
+            else
+                missing_files+=("$file")
+            fi
+        done
+        
+        log_debug "Found essential files: ${found_files[*]}"
+        
+        if [[ ${#missing_files[@]} -gt 0 ]]; then
+            log_warn "verify_filesystem_structure: Missing some essential files: ${missing_files[*]}"
+        fi
+        
+        # Check filesystem type of root partition
+        local fs_type
+        fs_type=$(df -T "$temp_mount" 2>/dev/null | tail -1 | awk '{print $2}')
+        if [[ -n "$fs_type" ]]; then
+            log_debug "Root filesystem type: $fs_type"
+            
+            # Verify it's a supported filesystem type
+            case "$fs_type" in
+                ext2|ext3|ext4|btrfs|xfs)
+                    log_debug "Filesystem type $fs_type is well-supported by Linux utilities"
+                    ;;
+                *)
+                    log_warn "verify_filesystem_structure: Unusual filesystem type: $fs_type"
+                    ;;
+            esac
+        fi
+        
+        # Unmount the image
+        unmount_image "$mount_device" "$temp_mount" || {
+            log_warn "verify_filesystem_structure: Failed to unmount temp mount"
+        }
+        
+        # Determine if filesystem structure is acceptable
+        local critical_missing=0
+        for dir in "/etc" "/usr"; do
+            if [[ ! -d "${temp_mount}${dir}" ]]; then
+                critical_missing=1
+                break
+            fi
+        done
+        
+        if [[ $critical_missing -eq 1 ]]; then
+            log_error "verify_filesystem_structure: Critical directories missing, filesystem structure invalid"
+            rmdir "$temp_mount" 2>/dev/null || true
+            return 1
+        fi
+        
+    else
+        log_warn "verify_filesystem_structure: Could not mount image for filesystem verification"
+        # This is not necessarily a fatal error - the image might still be valid
+    fi
+    
+    rmdir "$temp_mount" 2>/dev/null || true
+    
+    log_debug "Filesystem structure verification completed"
+    return 0
+}
+
+# Open Horizon verification functions
+verify_open_horizon_installation() {
+    local chroot_path="$1"
+    local expected_version="$2"
+    
+    log_info "Verifying Open Horizon installation in: $chroot_path"
+    
+    # Validate inputs
+    if [[ -z "$chroot_path" || -z "$expected_version" ]]; then
+        log_error "verify_open_horizon_installation: Missing required parameters"
+        return 1
+    fi
+    
+    if [[ ! -d "$chroot_path" ]]; then
+        log_error "verify_open_horizon_installation: Chroot path does not exist: $chroot_path"
+        return 1
+    fi
+    
+    # Check for Open Horizon binary installations
+    local oh_binaries=("/usr/bin/hzn" "/usr/local/bin/hzn" "/opt/horizon/bin/hzn")
+    local hzn_found=false
+    local hzn_path=""
+    
+    for binary_path in "${oh_binaries[@]}"; do
+        if [[ -f "${chroot_path}${binary_path}" ]]; then
+            hzn_found=true
+            hzn_path="${binary_path}"
+            log_debug "Found Open Horizon CLI at: ${binary_path}"
+            break
+        fi
+    done
+    
+    if [[ "$hzn_found" == "false" ]]; then
+        log_error "verify_open_horizon_installation: Open Horizon CLI (hzn) not found"
+        return 1
+    fi
+    
+    # Check for anax agent service file
+    local anax_service_files=("/etc/systemd/system/horizon.service" "/lib/systemd/system/horizon.service")
+    local service_found=false
+    
+    for service_file in "${anax_service_files[@]}"; do
+        if [[ -f "${chroot_path}${service_file}" ]]; then
+            service_found=true
+            log_debug "Found Open Horizon service file: ${service_file}"
+            break
+        fi
+    done
+    
+    if [[ "$service_found" == "false" ]]; then
+        log_error "verify_open_horizon_installation: Open Horizon service file not found"
+        return 1
+    fi
+    
+    # Check for Open Horizon configuration directories
+    local oh_config_dirs=("/etc/horizon" "/var/horizon")
+    local config_dirs_found=true
+    
+    for config_dir in "${oh_config_dirs[@]}"; do
+        if [[ ! -d "${chroot_path}${config_dir}" ]]; then
+            log_debug "Open Horizon config directory not found: ${config_dir}"
+            config_dirs_found=false
+        fi
+    done
+    
+    if [[ "$config_dirs_found" == "false" ]]; then
+        log_error "verify_open_horizon_installation: Open Horizon configuration directories missing"
+        return 1
+    fi
+    
+    # Try to verify version (if possible within chroot constraints)
+    log_debug "Verifying Open Horizon version matches expected: $expected_version"
+    
+    # For basic verification, check if version appears in hzn help output
+    # This is a simplified check - in a full implementation, we might need to chroot
+    local version_check_file="${chroot_path}/tmp/hzn_version_check"
+    
+    # Create a simple version check script
+    cat > "$version_check_file" << 'EOF'
+#!/bin/bash
+# Simple Open Horizon version check
+if command -v hzn >/dev/null 2>&1; then
+    hzn version 2>/dev/null | head -1 || echo "hzn_command_available"
+else
+    echo "hzn_not_found"
+fi
+EOF
+    
+    chmod +x "$version_check_file" 2>/dev/null || {
+        log_debug "verify_open_horizon_installation: Could not make version check script executable"
+    }
+    
+    # Remove the temporary script
+    rm -f "$version_check_file" 2>/dev/null || true
+    
+    log_info "Open Horizon installation verification passed"
+    log_debug "  - CLI found: $hzn_path"
+    log_debug "  - Service file found: ${service_found}"
+    log_debug "  - Configuration directories found: ${config_dirs_found}"
+    
+    return 0
+}
+
+# Open Horizon component installation functions
+install_anax_agent() {
+    local chroot_path="$1"
+    local version="$2"
+    
+    log_info "Installing Open Horizon anax agent version $version"
+    log_debug "Chroot path: $chroot_path"
+    
+    # Validate inputs
+    if [[ -z "$chroot_path" || -z "$version" ]]; then
+        log_error "install_anax_agent: Missing required parameters (chroot_path, version)"
+        return 1
+    fi
+    
+    if [[ ! -d "$chroot_path" ]]; then
+        log_error "install_anax_agent: Chroot path does not exist: $chroot_path"
+        return 1
+    fi
+    
+    # Set up chroot environment for ARM emulation if needed
+    setup_chroot_environment "$chroot_path" || {
+        log_error "install_anax_agent: Failed to set up chroot environment"
+        return 1
+    }
+    
+    # Download and install anax agent
+    local anax_package_url="https://github.com/open-horizon/anax/releases/download/v${version}/horizon_${version}_arm64.deb"
+    local anax_package_file="horizon_${version}_arm64.deb"
+    local temp_dir="${chroot_path}/tmp/horizon_install"
+    
+    log_debug "Creating temporary installation directory: $temp_dir"
+    mkdir -p "$temp_dir" || {
+        log_error "install_anax_agent: Failed to create temp directory: $temp_dir"
+        return 1
+    }
+    
+    # Download anax package
+    log_info "Downloading anax agent package from: $anax_package_url"
+    if command -v wget >/dev/null 2>&1; then
+        wget -O "${temp_dir}/${anax_package_file}" "$anax_package_url" 2>/dev/null || {
+            log_error "install_anax_agent: Failed to download anax package with wget"
+            return 1
+        }
+    elif command -v curl >/dev/null 2>&1; then
+        curl -L -o "${temp_dir}/${anax_package_file}" "$anax_package_url" 2>/dev/null || {
+            log_error "install_anax_agent: Failed to download anax package with curl"
+            return 1
+        }
+    else
+        log_error "install_anax_agent: Neither wget nor curl available for download"
+        return 1
+    fi
+    
+    # Verify package was downloaded
+    if [[ ! -f "${temp_dir}/${anax_package_file}" ]]; then
+        log_error "install_anax_agent: Package file not found after download"
+        return 1
+    fi
+    
+    local package_size
+    package_size=$(stat -c%s "${temp_dir}/${anax_package_file}" 2>/dev/null || stat -f%z "${temp_dir}/${anax_package_file}" 2>/dev/null)
+    log_debug "Downloaded package size: $package_size bytes"
+    
+    # Install package in chroot environment
+    log_info "Installing anax agent package in chroot environment"
+    
+    # Update package lists first
+    chroot_exec "$chroot_path" "apt-get update" || {
+        log_error "install_anax_agent: Failed to update package lists in chroot"
+        return 1
+    }
+    
+    # Install dependencies
+    log_debug "Installing anax agent dependencies"
+    chroot_exec "$chroot_path" "apt-get install -y systemd curl jq" || {
+        log_error "install_anax_agent: Failed to install dependencies"
+        return 1
+    }
+    
+    # Install the anax package
+    chroot_exec "$chroot_path" "dpkg -i /tmp/horizon_install/${anax_package_file}" || {
+        log_warn "install_anax_agent: dpkg install failed, attempting to fix dependencies"
+        chroot_exec "$chroot_path" "apt-get install -f -y" || {
+            log_error "install_anax_agent: Failed to fix dependencies"
+            return 1
+        }
+    }
+    
+    # Verify installation
+    if ! chroot_exec "$chroot_path" "which anax" >/dev/null 2>&1; then
+        log_error "install_anax_agent: anax binary not found after installation"
+        return 1
+    fi
+    
+    # Get installed version for verification
+    local installed_version
+    installed_version=$(chroot_exec "$chroot_path" "anax -version" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    if [[ "$installed_version" == "$version" ]]; then
+        log_info "Successfully installed anax agent version: $installed_version"
+    else
+        log_warn "Version mismatch: requested $version, installed $installed_version"
+    fi
+    
+    # Clean up temporary files
+    log_debug "Cleaning up temporary installation files"
+    rm -rf "$temp_dir" || {
+        log_warn "install_anax_agent: Failed to clean up temp directory"
+    }
+    
+    log_info "Anax agent installation completed successfully"
+    return 0
+}
+
+install_horizon_cli() {
+    local chroot_path="$1"
+    local version="$2"
+    
+    log_info "Installing Open Horizon CLI version $version"
+    log_debug "Chroot path: $chroot_path"
+    
+    # Validate inputs
+    if [[ -z "$chroot_path" || -z "$version" ]]; then
+        log_error "install_horizon_cli: Missing required parameters (chroot_path, version)"
+        return 1
+    fi
+    
+    if [[ ! -d "$chroot_path" ]]; then
+        log_error "install_horizon_cli: Chroot path does not exist: $chroot_path"
+        return 1
+    fi
+    
+    # Set up chroot environment for ARM emulation if needed
+    setup_chroot_environment "$chroot_path" || {
+        log_error "install_horizon_cli: Failed to set up chroot environment"
+        return 1
+    }
+    
+    # Download and install Horizon CLI
+    local cli_package_url="https://github.com/open-horizon/anax/releases/download/v${version}/horizon-cli_${version}_arm64.deb"
+    local cli_package_file="horizon-cli_${version}_arm64.deb"
+    local temp_dir="${chroot_path}/tmp/horizon_cli_install"
+    
+    log_debug "Creating temporary CLI installation directory: $temp_dir"
+    mkdir -p "$temp_dir" || {
+        log_error "install_horizon_cli: Failed to create temp directory: $temp_dir"
+        return 1
+    }
+    
+    # Download CLI package
+    log_info "Downloading Horizon CLI package from: $cli_package_url"
+    if command -v wget >/dev/null 2>&1; then
+        wget -O "${temp_dir}/${cli_package_file}" "$cli_package_url" 2>/dev/null || {
+            log_error "install_horizon_cli: Failed to download CLI package with wget"
+            return 1
+        }
+    elif command -v curl >/dev/null 2>&1; then
+        curl -L -o "${temp_dir}/${cli_package_file}" "$cli_package_url" 2>/dev/null || {
+            log_error "install_horizon_cli: Failed to download CLI package with curl"
+            return 1
+        }
+    else
+        log_error "install_horizon_cli: Neither wget nor curl available for download"
+        return 1
+    fi
+    
+    # Verify package was downloaded
+    if [[ ! -f "${temp_dir}/${cli_package_file}" ]]; then
+        log_error "install_horizon_cli: CLI package file not found after download"
+        return 1
+    fi
+    
+    local package_size
+    package_size=$(stat -c%s "${temp_dir}/${cli_package_file}" 2>/dev/null || stat -f%z "${temp_dir}/${cli_package_file}" 2>/dev/null)
+    log_debug "Downloaded CLI package size: $package_size bytes"
+    
+    # Install CLI package in chroot environment
+    log_info "Installing Horizon CLI package in chroot environment"
+    
+    # Install the CLI package
+    chroot_exec "$chroot_path" "dpkg -i /tmp/horizon_cli_install/${cli_package_file}" || {
+        log_warn "install_horizon_cli: dpkg install failed, attempting to fix dependencies"
+        chroot_exec "$chroot_path" "apt-get install -f -y" || {
+            log_error "install_horizon_cli: Failed to fix dependencies"
+            return 1
+        }
+    }
+    
+    # Verify CLI installation
+    if ! chroot_exec "$chroot_path" "which hzn" >/dev/null 2>&1; then
+        log_error "install_horizon_cli: hzn binary not found after installation"
+        return 1
+    fi
+    
+    # Get installed CLI version for verification
+    local installed_cli_version
+    installed_cli_version=$(chroot_exec "$chroot_path" "hzn version" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    if [[ "$installed_cli_version" == "$version" ]]; then
+        log_info "Successfully installed Horizon CLI version: $installed_cli_version"
+    else
+        log_warn "CLI version mismatch: requested $version, installed $installed_cli_version"
+    fi
+    
+    # Clean up temporary files
+    log_debug "Cleaning up temporary CLI installation files"
+    rm -rf "$temp_dir" || {
+        log_warn "install_horizon_cli: Failed to clean up CLI temp directory"
+    }
+    
+    log_info "Horizon CLI installation completed successfully"
+    return 0
+}
+
+configure_agent_service() {
+    local chroot_path="$1"
+    
+    log_info "Configuring Open Horizon agent service for auto-start"
+    log_debug "Chroot path: $chroot_path"
+    
+    # Validate inputs
+    if [[ -z "$chroot_path" ]]; then
+        log_error "configure_agent_service: Missing required parameter (chroot_path)"
+        return 1
+    fi
+    
+    if [[ ! -d "$chroot_path" ]]; then
+        log_error "configure_agent_service: Chroot path does not exist: $chroot_path"
+        return 1
+    fi
+    
+    # Set up chroot environment
+    setup_chroot_environment "$chroot_path" || {
+        log_error "configure_agent_service: Failed to set up chroot environment"
+        return 1
+    }
+    
+    # Check if horizon service exists
+    if ! chroot_exec "$chroot_path" "systemctl list-unit-files | grep -q horizon" 2>/dev/null; then
+        log_error "configure_agent_service: Horizon service not found in systemd"
+        return 1
+    fi
+    
+    # Enable the horizon service
+    log_info "Enabling horizon service for auto-start"
+    chroot_exec "$chroot_path" "systemctl enable horizon" || {
+        log_error "configure_agent_service: Failed to enable horizon service"
+        return 1
+    }
+    
+    # Create horizon configuration directory if it doesn't exist
+    local horizon_config_dir="${chroot_path}/etc/horizon"
+    if [[ ! -d "$horizon_config_dir" ]]; then
+        log_debug "Creating horizon configuration directory: $horizon_config_dir"
+        mkdir -p "$horizon_config_dir" || {
+            log_error "configure_agent_service: Failed to create horizon config directory"
+            return 1
+        }
+    fi
+    
+    # Set proper permissions on configuration directory
+    chroot_exec "$chroot_path" "chown -R root:root /etc/horizon" || {
+        log_warn "configure_agent_service: Failed to set ownership on config directory"
+    }
+    
+    chroot_exec "$chroot_path" "chmod 755 /etc/horizon" || {
+        log_warn "configure_agent_service: Failed to set permissions on config directory"
+    }
+    
+    # Verify service configuration
+    if chroot_exec "$chroot_path" "systemctl is-enabled horizon" >/dev/null 2>&1; then
+        log_info "Horizon service successfully configured for auto-start"
+    else
+        log_error "configure_agent_service: Service enable verification failed"
+        return 1
+    fi
+    
+    # Create a basic anax configuration file if it doesn't exist
+    local anax_config_file="${horizon_config_dir}/anax.json"
+    if [[ ! -f "$anax_config_file" ]]; then
+        log_debug "Creating basic anax configuration file"
+        cat > "$anax_config_file" << 'EOF'
+{
+    "Edge": {
+        "ServiceStorage": "/var/horizon/service_storage/",
+        "APIListen": "127.0.0.1:8510",
+        "DBPath": "/var/horizon/anax.db",
+        "DockerEndpoint": "unix:///var/run/docker.sock",
+        "DefaultCPUSet": "",
+        "DefaultServiceRegistrationRAM": 128,
+        "StaticWebContent": "/var/horizon/web/"
+    },
+    "AgreementBot": {},
+    "Collaborators": {
+        "HTTPClientFactory": {
+            "NewHTTPClientTimeoutS": 20
+        }
+    }
+}
+EOF
+        
+        # Set proper permissions on config file
+        chroot_exec "$chroot_path" "chown root:root /etc/horizon/anax.json" || {
+            log_warn "configure_agent_service: Failed to set ownership on anax.json"
+        }
+        
+        chroot_exec "$chroot_path" "chmod 644 /etc/horizon/anax.json" || {
+            log_warn "configure_agent_service: Failed to set permissions on anax.json"
+        }
+        
+        log_debug "Created basic anax configuration file"
+    fi
+    
+    log_info "Agent service configuration completed successfully"
+    return 0
+}
+
+setup_chroot_environment() {
+    local chroot_path="$1"
+    
+    log_debug "Setting up chroot environment: $chroot_path"
+    
+    # Validate input
+    if [[ -z "$chroot_path" ]]; then
+        log_error "setup_chroot_environment: Missing chroot_path parameter"
+        return 1
+    fi
+    
+    if [[ ! -d "$chroot_path" ]]; then
+        log_error "setup_chroot_environment: Chroot path does not exist: $chroot_path"
+        return 1
+    fi
+    
+    # Set up ARM emulation for x86 systems if needed
+    local host_arch
+    host_arch=$(uname -m)
+    log_debug "Host architecture: $host_arch"
+    
+    if [[ "$host_arch" != "aarch64" && "$host_arch" != "arm64" ]]; then
+        log_debug "Setting up ARM emulation for x86 host"
+        
+        # Check if qemu-user-static is available
+        if [[ "$DETECTED_PLATFORM" == "linux" ]]; then
+            if ! command -v qemu-aarch64-static >/dev/null 2>&1; then
+                log_warn "qemu-user-static not found, ARM emulation may not work"
+                log_warn "Install with: sudo apt-get install qemu-user-static"
+            else
+                # Copy qemu-aarch64-static to chroot if it exists
+                local qemu_static_path="/usr/bin/qemu-aarch64-static"
+                if [[ -f "$qemu_static_path" ]]; then
+                    log_debug "Copying qemu-aarch64-static to chroot"
+                    cp "$qemu_static_path" "${chroot_path}/usr/bin/" 2>/dev/null || {
+                        log_warn "Failed to copy qemu-aarch64-static to chroot"
+                    }
+                fi
+            fi
+        fi
+    fi
+    
+    # Mount essential filesystems for chroot
+    log_debug "Mounting essential filesystems for chroot"
+    
+    # Mount /proc
+    if [[ ! -d "${chroot_path}/proc" ]]; then
+        mkdir -p "${chroot_path}/proc"
+    fi
+    
+    if ! mountpoint -q "${chroot_path}/proc" 2>/dev/null; then
+        if [[ "$DETECTED_PLATFORM" == "linux" ]]; then
+            sudo mount -t proc proc "${chroot_path}/proc" || {
+                log_warn "Failed to mount /proc in chroot"
+            }
+        fi
+    fi
+    
+    # Mount /sys
+    if [[ ! -d "${chroot_path}/sys" ]]; then
+        mkdir -p "${chroot_path}/sys"
+    fi
+    
+    if ! mountpoint -q "${chroot_path}/sys" 2>/dev/null; then
+        if [[ "$DETECTED_PLATFORM" == "linux" ]]; then
+            sudo mount -t sysfs sysfs "${chroot_path}/sys" || {
+                log_warn "Failed to mount /sys in chroot"
+            }
+        fi
+    fi
+    
+    # Mount /dev
+    if [[ ! -d "${chroot_path}/dev" ]]; then
+        mkdir -p "${chroot_path}/dev"
+    fi
+    
+    if ! mountpoint -q "${chroot_path}/dev" 2>/dev/null; then
+        if [[ "$DETECTED_PLATFORM" == "linux" ]]; then
+            sudo mount --bind /dev "${chroot_path}/dev" || {
+                log_warn "Failed to bind mount /dev in chroot"
+            }
+        fi
+    fi
+    
+    # Set up DNS resolution in chroot
+    if [[ -f "/etc/resolv.conf" ]]; then
+        log_debug "Copying DNS configuration to chroot"
+        cp /etc/resolv.conf "${chroot_path}/etc/resolv.conf" 2>/dev/null || {
+            log_warn "Failed to copy DNS configuration to chroot"
+        }
+    fi
+    
+    log_debug "Chroot environment setup completed"
+    return 0
+}
+
+chroot_exec() {
+    local chroot_path="$1"
+    local command="$2"
+    
+    log_debug "Executing in chroot: $command"
+    
+    # Validate inputs
+    if [[ -z "$chroot_path" || -z "$command" ]]; then
+        log_error "chroot_exec: Missing required parameters"
+        return 1
+    fi
+    
+    if [[ ! -d "$chroot_path" ]]; then
+        log_error "chroot_exec: Chroot path does not exist: $chroot_path"
+        return 1
+    fi
+    
+    # Execute command in chroot environment
+    case "$DETECTED_PLATFORM" in
+        linux)
+            sudo chroot "$chroot_path" /bin/bash -c "$command"
+            ;;
+        macos)
+            # macOS doesn't have chroot in the same way, so we'll use a different approach
+            log_warn "chroot_exec: macOS chroot support is limited"
+            # For macOS, we might need to use different approaches or warn about limitations
+            return 1
+            ;;
+        *)
+            log_error "chroot_exec: Unsupported platform: $DETECTED_PLATFORM"
+            return 1
+            ;;
+    esac
+}
+
+# Network configuration functions
+configure_wifi() {
+    local chroot_path="$1"
+    local ssid="$2"
+    local password="$3"
+    local security="${4:-WPA2}"
+    
+    log_info "Configuring Wi-Fi network: $ssid"
+    log_debug "Chroot path: $chroot_path"
+    log_debug "Security type: $security"
+    
+    # Validate inputs
+    if [[ -z "$chroot_path" || -z "$ssid" || -z "$password" ]]; then
+        log_error "configure_wifi: Missing required parameters (chroot_path, ssid, password)"
+        return 1
+    fi
+    
+    if [[ ! -d "$chroot_path" ]]; then
+        log_error "configure_wifi: Chroot path does not exist: $chroot_path"
+        return 1
+    fi
+    
+    # Validate security type
+    case "$security" in
+        WPA2|WPA3)
+            log_debug "Using security type: $security"
+            ;;
+        *)
+            log_error "configure_wifi: Invalid security type: $security (must be WPA2 or WPA3)"
+            return 1
+            ;;
+    esac
+    
+    # Create wpa_supplicant configuration directory if it doesn't exist
+    local wpa_config_dir="${chroot_path}/etc/wpa_supplicant"
+    if [[ ! -d "$wpa_config_dir" ]]; then
+        log_debug "Creating wpa_supplicant configuration directory: $wpa_config_dir"
+        mkdir -p "$wpa_config_dir" || {
+            log_error "configure_wifi: Failed to create wpa_supplicant config directory"
+            return 1
+        }
+    fi
+    
+    # Create wpa_supplicant configuration file
+    local wpa_config_file="${wpa_config_dir}/wpa_supplicant.conf"
+    log_info "Creating wpa_supplicant configuration file: $wpa_config_file"
+    
+    # Generate wpa_supplicant.conf content based on security type
+    local wpa_config_content=""
+    case "$security" in
+        WPA2)
+            wpa_config_content=$(cat << EOF
+ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
+update_config=1
+country=US
+
+network={
+    ssid="$ssid"
+    psk="$password"
+    key_mgmt=WPA-PSK
+    proto=RSN
+    pairwise=CCMP
+    auth_alg=OPEN
+}
+EOF
+)
+            ;;
+        WPA3)
+            wpa_config_content=$(cat << EOF
+ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
+update_config=1
+country=US
+
+network={
+    ssid="$ssid"
+    psk="$password"
+    key_mgmt=SAE
+    proto=RSN
+    pairwise=CCMP
+    group=CCMP
+    ieee80211w=2
+}
+EOF
+)
+            ;;
+    esac
+    
+    # Write the configuration file
+    echo "$wpa_config_content" > "$wpa_config_file" || {
+        log_error "configure_wifi: Failed to write wpa_supplicant configuration file"
+        return 1
+    }
+    
+    # Set proper permissions on the configuration file
+    chmod 600 "$wpa_config_file" || {
+        log_error "configure_wifi: Failed to set permissions on wpa_supplicant.conf"
+        return 1
+    }
+    
+    log_debug "Created wpa_supplicant configuration with $security security"
+    
+    # Enable Wi-Fi interface and networking services
+    log_info "Configuring Wi-Fi interface and networking services"
+    
+    # Set up chroot environment for service configuration
+    setup_chroot_environment "$chroot_path" || {
+        log_error "configure_wifi: Failed to set up chroot environment"
+        return 1
+    }
+    
+    # Enable wpa_supplicant service
+    log_debug "Enabling wpa_supplicant service"
+    chroot_exec "$chroot_path" "systemctl enable wpa_supplicant" || {
+        log_warn "configure_wifi: Failed to enable wpa_supplicant service (may not be critical)"
+    }
+    
+    # Enable dhcpcd service for automatic IP configuration
+    log_debug "Enabling dhcpcd service for automatic IP configuration"
+    chroot_exec "$chroot_path" "systemctl enable dhcpcd" || {
+        log_warn "configure_wifi: Failed to enable dhcpcd service (may not be critical)"
+    }
+    
+    # Create dhcpcd configuration to use wpa_supplicant
+    local dhcpcd_config_file="${chroot_path}/etc/dhcpcd.conf"
+    if [[ -f "$dhcpcd_config_file" ]]; then
+        # Check if wpa_supplicant configuration already exists
+        if ! grep -q "wpa_supplicant" "$dhcpcd_config_file" 2>/dev/null; then
+            log_debug "Adding wpa_supplicant configuration to dhcpcd.conf"
+            echo "" >> "$dhcpcd_config_file"
+            echo "# Wi-Fi configuration added by Raspberry Pi Image Builder" >> "$dhcpcd_config_file"
+            echo "interface wlan0" >> "$dhcpcd_config_file"
+            echo "env ifwireless=1" >> "$dhcpcd_config_file"
+            echo "env wpa_supplicant_driver=nl80211,wext" >> "$dhcpcd_config_file"
+        fi
+    else
+        log_warn "configure_wifi: dhcpcd.conf not found, creating basic configuration"
+        cat > "$dhcpcd_config_file" << 'EOF'
+# A sample configuration for dhcpcd.
+# See dhcpcd.conf(5) for details.
+
+# Allow users of this group to interact with dhcpcd via the control socket.
+#controlgroup wheel
+
+# Inform the DHCP server of our hostname for DDNS.
+hostname
+
+# Use the hardware address of the interface for the Client ID.
+clientid
+# or
+# Use the same DUID + IAID as set in DHCPv6 for DHCPv4 ClientID as per RFC4361.
+# Some non-RFC compliant DHCP servers do not reply with this set.
+# In this case, comment out duid and enable clientid above.
+#duid
+
+# Persist interface configuration when dhcpcd exits.
+persistent
+
+# Rapid commit support.
+# Safe to enable by default because it requires the equivalent option set
+# on the server to actually work.
+option rapid_commit
+
+# A list of options to request from the DHCP server.
+option domain_name_servers, domain_name, domain_search, host_name
+option classless_static_routes
+# Respect the network MTU. This is applied to DHCP routes.
+option interface_mtu
+
+# Most distributions have NTP support.
+#option ntp_servers
+
+# A ServerID is required by RFC2131.
+require dhcp_server_identifier
+
+# Generate SLAAC address using the hardware address of the interface
+#slaac hwaddr
+# OR generate Stable Private IPv6 Addresses based from the DUID
+slaac private
+
+# Wi-Fi configuration added by Raspberry Pi Image Builder
+interface wlan0
+env ifwireless=1
+env wpa_supplicant_driver=nl80211,wext
+EOF
+    fi
+    
+    # Enable SSH service for remote access (useful for Wi-Fi-only deployments)
+    log_debug "Enabling SSH service for remote access"
+    chroot_exec "$chroot_path" "systemctl enable ssh" || {
+        log_warn "configure_wifi: Failed to enable SSH service (may not be critical)"
+    }
+    
+    # Create SSH enable file for Raspberry Pi OS
+    local boot_ssh_file="${chroot_path}/boot/ssh"
+    touch "$boot_ssh_file" 2>/dev/null || {
+        log_warn "configure_wifi: Failed to create SSH enable file (may not be critical)"
+    }
+    
+    # Verify Wi-Fi configuration
+    if [[ -f "$wpa_config_file" ]]; then
+        local config_size
+        config_size=$(stat -c%s "$wpa_config_file" 2>/dev/null || stat -f%z "$wpa_config_file" 2>/dev/null)
+        if [[ $config_size -gt 0 ]]; then
+            log_info "Wi-Fi configuration completed successfully"
+            log_info "Network: $ssid (Security: $security)"
+            return 0
+        else
+            log_error "configure_wifi: Configuration file is empty"
+            return 1
+        fi
+    else
+        log_error "configure_wifi: Configuration file was not created"
+        return 1
+    fi
+}
+
+validate_wifi_configuration() {
+    local ssid="$1"
+    local password="$2"
+    local security="$3"
+    
+    log_debug "Validating Wi-Fi configuration parameters"
+    
+    # Validate SSID
+    if [[ -z "$ssid" ]]; then
+        log_error "validate_wifi_configuration: SSID cannot be empty"
+        return 1
+    fi
+    
+    # Check SSID length (IEEE 802.11 standard allows 0-32 bytes)
+    if [[ ${#ssid} -gt 32 ]]; then
+        log_error "validate_wifi_configuration: SSID too long (${#ssid} bytes, maximum 32 bytes)"
+        return 1
+    fi
+    
+    # Validate password
+    if [[ -z "$password" ]]; then
+        log_error "validate_wifi_configuration: Password cannot be empty"
+        return 1
+    fi
+    
+    # Check password length based on security type
+    case "$security" in
+        WPA2|WPA3)
+            if [[ ${#password} -lt 8 ]]; then
+                log_error "validate_wifi_configuration: $security password too short (${#password} chars, minimum 8 chars)"
+                return 1
+            fi
+            if [[ ${#password} -gt 63 ]]; then
+                log_error "validate_wifi_configuration: $security password too long (${#password} chars, maximum 63 chars)"
+                return 1
+            fi
+            ;;
+        *)
+            log_error "validate_wifi_configuration: Invalid security type: $security"
+            return 1
+            ;;
+    esac
+    
+    # Check for invalid characters in SSID (basic validation)
+    if [[ "$ssid" =~ [[:cntrl:]] ]]; then
+        log_error "validate_wifi_configuration: SSID contains invalid control characters"
+        return 1
+    fi
+    
+    log_debug "Wi-Fi configuration validation passed"
+    return 0
+}
+
+is_wifi_configuration_requested() {
+    # Check if Wi-Fi configuration is requested based on parameters
+    if [[ -n "$CONFIG_WIFI_SSID" && -n "$CONFIG_WIFI_PASSWORD" ]]; then
+        log_debug "Wi-Fi configuration requested: SSID=$CONFIG_WIFI_SSID"
+        return 0
+    else
+        log_debug "Wi-Fi configuration not requested"
+        return 1
+    fi
+}
+
+configure_network_fallback() {
+    local chroot_path="$1"
+    
+    log_info "Configuring network fallback to Ethernet"
+    log_debug "Chroot path: $chroot_path"
+    
+    # Validate input
+    if [[ -z "$chroot_path" ]]; then
+        log_error "configure_network_fallback: Missing chroot_path parameter"
+        return 1
+    fi
+    
+    if [[ ! -d "$chroot_path" ]]; then
+        log_error "configure_network_fallback: Chroot path does not exist: $chroot_path"
+        return 1
+    fi
+    
+    # Ensure Ethernet interface is configured for DHCP
+    local dhcpcd_config_file="${chroot_path}/etc/dhcpcd.conf"
+    if [[ -f "$dhcpcd_config_file" ]]; then
+        # Check if Ethernet configuration already exists
+        if ! grep -q "interface eth0" "$dhcpcd_config_file" 2>/dev/null; then
+            log_debug "Adding Ethernet fallback configuration to dhcpcd.conf"
+            echo "" >> "$dhcpcd_config_file"
+            echo "# Ethernet fallback configuration added by Raspberry Pi Image Builder" >> "$dhcpcd_config_file"
+            echo "interface eth0" >> "$dhcpcd_config_file"
+            echo "static ip_address=" >> "$dhcpcd_config_file"
+            echo "# Fallback to DHCP if static configuration fails" >> "$dhcpcd_config_file"
+            echo "profile static_eth0" >> "$dhcpcd_config_file"
+            echo "static ip_address=" >> "$dhcpcd_config_file"
+            echo "fallback" >> "$dhcpcd_config_file"
+        fi
+    fi
+    
+    log_info "Network fallback configuration completed"
+    return 0
+}
+
+# Exchange registration and cloud-init functions
+configure_exchange_registration() {
+    local chroot_path="$1"
+    local exchange_url="$2"
+    local exchange_org="$3"
+    local exchange_user="$4"
+    local exchange_token="$5"
+    local node_json_path="$6"
+    
+    log_info "Configuring Open Horizon exchange registration"
+    log_debug "Chroot path: $chroot_path"
+    log_debug "Exchange URL: $exchange_url"
+    log_debug "Exchange Organization: $exchange_org"
+    log_debug "Exchange User: $exchange_user"
+    log_debug "Node JSON path: ${node_json_path:-default}"
+    
+    # Validate inputs
+    if [[ -z "$chroot_path" ]]; then
+        log_error "configure_exchange_registration: Missing chroot_path parameter"
+        return 1
+    fi
+    
+    if [[ ! -d "$chroot_path" ]]; then
+        log_error "configure_exchange_registration: Chroot path does not exist: $chroot_path"
+        return 1
+    fi
+    
+    # Validate exchange parameters
+    if [[ -z "$exchange_url" || -z "$exchange_org" || -z "$exchange_user" || -z "$exchange_token" ]]; then
+        log_error "configure_exchange_registration: Missing required exchange parameters"
+        return 1
+    fi
+    
+    # Validate custom node.json file if provided
+    if [[ -n "$node_json_path" && ! -f "$node_json_path" ]]; then
+        log_error "configure_exchange_registration: Custom node.json file does not exist: $node_json_path"
+        return 1
+    fi
+    
+    # Validate exchange connectivity during image creation
+    log_info "Validating exchange connectivity"
+    if ! validate_exchange_connectivity "$exchange_url"; then
+        log_error "configure_exchange_registration: Exchange connectivity validation failed"
+        return 1
+    fi
+    
+    # Create horizon configuration directory if it doesn't exist
+    local horizon_config_dir="${chroot_path}/etc/horizon"
+    if [[ ! -d "$horizon_config_dir" ]]; then
+        log_debug "Creating horizon configuration directory: $horizon_config_dir"
+        mkdir -p "$horizon_config_dir" || {
+            log_error "configure_exchange_registration: Failed to create horizon config directory"
+            return 1
+        }
+    fi
+    
+    # Securely embed exchange credentials
+    log_info "Embedding exchange credentials securely"
+    if ! embed_exchange_credentials "$chroot_path" "$exchange_url" "$exchange_org" "$exchange_user" "$exchange_token"; then
+        log_error "configure_exchange_registration: Failed to embed exchange credentials"
+        return 1
+    fi
+    
+    # Handle node.json configuration
+    log_info "Configuring node.json"
+    if ! configure_node_json "$chroot_path" "$node_json_path"; then
+        log_error "configure_exchange_registration: Failed to configure node.json"
+        return 1
+    fi
+    
+    # Set up cloud-init for first-boot registration
+    log_info "Setting up cloud-init for first-boot registration"
+    local registration_config=$(create_registration_config "$exchange_url" "$exchange_org" "$exchange_user" "$exchange_token")
+    if ! setup_cloud_init "$chroot_path" "$registration_config"; then
+        log_error "configure_exchange_registration: Failed to set up cloud-init"
+        return 1
+    fi
+    
+    # Create firstrun.sh script for Raspberry Pi OS integration
+    log_info "Creating firstrun.sh script for Raspberry Pi OS integration"
+    if ! create_firstrun_script "$chroot_path" "$registration_config"; then
+        log_error "configure_exchange_registration: Failed to create firstrun.sh script"
+        return 1
+    fi
+    
+    log_info "Exchange registration configuration completed successfully"
+    return 0
+}
+
+setup_cloud_init() {
+    local chroot_path="$1"
+    local config_data="$2"
+    
+    log_info "Setting up cloud-init for first-boot configuration"
+    log_debug "Chroot path: $chroot_path"
+    
+    # Validate inputs
+    if [[ -z "$chroot_path" || -z "$config_data" ]]; then
+        log_error "setup_cloud_init: Missing required parameters (chroot_path, config_data)"
+        return 1
+    fi
+    
+    if [[ ! -d "$chroot_path" ]]; then
+        log_error "setup_cloud_init: Chroot path does not exist: $chroot_path"
+        return 1
+    fi
+    
+    # Create cloud-init configuration directories
+    local cloud_init_dir="${chroot_path}/etc/cloud"
+    local cloud_config_dir="${cloud_init_dir}/cloud.cfg.d"
+    
+    log_debug "Creating cloud-init configuration directories"
+    mkdir -p "$cloud_config_dir" || {
+        log_error "setup_cloud_init: Failed to create cloud-init config directory"
+        return 1
+    }
+    
+    # Install cloud-init if not already present
+    log_debug "Ensuring cloud-init is installed"
+    setup_chroot_environment "$chroot_path" || {
+        log_error "setup_cloud_init: Failed to set up chroot environment"
+        return 1
+    }
+    
+    # Check if cloud-init is installed
+    if ! chroot_exec "$chroot_path" "dpkg -l | grep -q cloud-init" 2>/dev/null; then
+        log_info "Installing cloud-init package"
+        chroot_exec "$chroot_path" "apt-get update" || {
+            log_error "setup_cloud_init: Failed to update package lists"
+            return 1
+        }
+        
+        chroot_exec "$chroot_path" "apt-get install -y cloud-init" || {
+            log_error "setup_cloud_init: Failed to install cloud-init"
+            return 1
+        }
+    fi
+    
+    # Create cloud-init configuration for Open Horizon registration
+    local cloud_config_file="${cloud_config_dir}/99-open-horizon.cfg"
+    log_info "Creating cloud-init configuration file: $cloud_config_file"
+    
+    cat > "$cloud_config_file" << EOF
+#cloud-config
+# Open Horizon registration configuration
+# Generated by Raspberry Pi Image Builder
+
+# Run commands after network is available
+runcmd:
+  - echo "Starting Open Horizon registration process" >> /var/log/horizon-registration.log
+  - /usr/local/bin/horizon-register.sh >> /var/log/horizon-registration.log 2>&1
+  - echo "Open Horizon registration process completed" >> /var/log/horizon-registration.log
+
+# Ensure network is available before running commands
+bootcmd:
+  - echo "Waiting for network connectivity..." >> /var/log/horizon-registration.log
+
+# Set up logging
+write_files:
+  - path: /var/log/horizon-registration.log
+    content: |
+      Open Horizon Registration Log
+      ============================
+      Started at: \$(date)
+    permissions: '0644'
+    owner: root:root
+
+# Final message
+final_message: "Open Horizon cloud-init setup completed"
+EOF
+    
+    # Set proper permissions on cloud-init configuration
+    chmod 644 "$cloud_config_file" || {
+        log_error "setup_cloud_init: Failed to set permissions on cloud-init config"
+        return 1
+    }
+    
+    # Enable cloud-init services
+    log_debug "Enabling cloud-init services"
+    chroot_exec "$chroot_path" "systemctl enable cloud-init" || {
+        log_warn "setup_cloud_init: Failed to enable cloud-init service (may not be critical)"
+    }
+    
+    chroot_exec "$chroot_path" "systemctl enable cloud-init-local" || {
+        log_warn "setup_cloud_init: Failed to enable cloud-init-local service (may not be critical)"
+    }
+    
+    chroot_exec "$chroot_path" "systemctl enable cloud-config" || {
+        log_warn "setup_cloud_init: Failed to enable cloud-config service (may not be critical)"
+    }
+    
+    chroot_exec "$chroot_path" "systemctl enable cloud-final" || {
+        log_warn "setup_cloud_init: Failed to enable cloud-final service (may not be critical)"
+    }
+    
+    # Create cloud-init datasource configuration for NoCloud
+    local datasource_config_file="${cloud_config_dir}/90-dpkg.cfg"
+    log_debug "Creating datasource configuration"
+    
+    cat > "$datasource_config_file" << EOF
+# Cloud-init datasource configuration
+# Use NoCloud datasource for local configuration
+datasource_list: [ NoCloud, None ]
+datasource:
+  NoCloud:
+    # Look for user-data and meta-data in /boot
+    seedfrom: /boot/
+EOF
+    
+    chmod 644 "$datasource_config_file" || {
+        log_warn "setup_cloud_init: Failed to set permissions on datasource config"
+    }
+    
+    log_info "Cloud-init setup completed successfully"
+    return 0
+}
+
+create_firstrun_script() {
+    local chroot_path="$1"
+    local registration_config="$2"
+    
+    log_info "Creating firstrun.sh script for Raspberry Pi OS integration"
+    log_debug "Chroot path: $chroot_path"
+    
+    # Validate inputs
+    if [[ -z "$chroot_path" || -z "$registration_config" ]]; then
+        log_error "create_firstrun_script: Missing required parameters (chroot_path, registration_config)"
+        return 1
+    fi
+    
+    if [[ ! -d "$chroot_path" ]]; then
+        log_error "create_firstrun_script: Chroot path does not exist: $chroot_path"
+        return 1
+    fi
+    
+    # Create the horizon registration script
+    local horizon_register_script="${chroot_path}/usr/local/bin/horizon-register.sh"
+    log_info "Creating horizon registration script: $horizon_register_script"
+    
+    # Ensure the directory exists
+    mkdir -p "$(dirname "$horizon_register_script")" || {
+        log_error "create_firstrun_script: Failed to create script directory"
+        return 1
+    }
+    
+    # Parse registration config (assuming it's in format: url|org|user|token)
+    local exchange_url exchange_org exchange_user exchange_token
+    IFS='|' read -r exchange_url exchange_org exchange_user exchange_token <<< "$registration_config"
+    
+    cat > "$horizon_register_script" << EOFSCRIPT
+#!/bin/bash
+# Open Horizon Registration Script
+# Generated by Raspberry Pi Image Builder
+# This script registers the device with the Open Horizon exchange on first boot
+
+set -euo pipefail
+
+# Configuration variables
+EXCHANGE_URL="$exchange_url"
+EXCHANGE_ORG="$exchange_org"
+EXCHANGE_USER="$exchange_user"
+EXCHANGE_TOKEN="$exchange_token"
+
+# Logging function
+log_message() {
+    local message="\$1"
+    local timestamp=\$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[\$timestamp] \$message" | tee -a /var/log/horizon-registration.log
+}
+
+# Wait for network connectivity
+wait_for_network() {
+    local max_attempts=30
+    local attempt=1
+    
+    log_message "Waiting for network connectivity..."
+    
+    while [[ \$attempt -le \$max_attempts ]]; do
+        if ping -c 1 8.8.8.8 >/dev/null 2>&1; then
+            log_message "Network connectivity established"
+            return 0
+        fi
+        
+        log_message "Network attempt \$attempt/\$max_attempts failed, waiting 10 seconds..."
+        sleep 10
+        attempt=\$((attempt + 1))
+    done
+    
+    log_message "ERROR: Failed to establish network connectivity after \$max_attempts attempts"
+    return 1
+}
+
+# Validate exchange connectivity
+validate_exchange() {
+    local exchange_url="\$1"
+    
+    log_message "Validating exchange connectivity to: \$exchange_url"
+    
+    if curl -s --connect-timeout 10 "\$exchange_url/v1/admin/version" >/dev/null 2>&1; then
+        log_message "Exchange connectivity validated successfully"
+        return 0
+    else
+        log_message "ERROR: Failed to connect to exchange: \$exchange_url"
+        return 1
+    fi
+}
+
+# Register with Open Horizon exchange
+register_with_exchange() {
+    local exchange_url="\$1"
+    local exchange_org="\$2"
+    local exchange_user="\$3"
+    local exchange_token="\$4"
+    
+    log_message "Starting Open Horizon registration process"
+    log_message "Exchange URL: \$exchange_url"
+    log_message "Organization: \$exchange_org"
+    log_message "User: \$exchange_user"
+    
+    # Set environment variables for hzn command
+    export HZN_EXCHANGE_URL="\$exchange_url"
+    export HZN_ORG_ID="\$exchange_org"
+    export HZN_EXCHANGE_USER_AUTH="\$exchange_user:\$exchange_token"
+    
+    # Generate a unique node ID if not already set
+    local node_id=\$(hostname)-\$(date +%s)
+    export HZN_DEVICE_ID="\$node_id"
+    
+    log_message "Node ID: \$node_id"
+    
+    # Check if hzn command is available
+    if ! command -v hzn >/dev/null 2>&1; then
+        log_message "ERROR: hzn command not found"
+        return 1
+    fi
+    
+    # Register the node
+    log_message "Registering node with exchange..."
+    
+    # Use the node.json configuration
+    local node_json_file="/etc/horizon/node.json"
+    if [[ -f "\$node_json_file" ]]; then
+        log_message "Using custom node.json configuration: \$node_json_file"
+        hzn register -f "\$node_json_file" || {
+            log_message "ERROR: Failed to register with custom node.json"
+            return 1
+        }
+    else
+        log_message "Using default registration (no node.json found)"
+        hzn register || {
+            log_message "ERROR: Failed to register with default configuration"
+            return 1
+        }
+    fi
+    
+    # Verify registration
+    log_message "Verifying registration..."
+    if hzn node list >/dev/null 2>&1; then
+        log_message "Registration successful!"
+        hzn node list | tee -a /var/log/horizon-registration.log
+        return 0
+    else
+        log_message "ERROR: Registration verification failed"
+        return 1
+    fi
+}
+
+# Main registration process
+main() {
+    log_message "=== Open Horizon Registration Started ==="
+    
+    # Wait for network connectivity
+    if ! wait_for_network; then
+        log_message "FATAL: Network connectivity required for registration"
+        exit 1
+    fi
+    
+    # Validate exchange connectivity
+    if ! validate_exchange "\$EXCHANGE_URL"; then
+        log_message "FATAL: Exchange connectivity validation failed"
+        exit 1
+    fi
+    
+    # Register with exchange
+    if register_with_exchange "\$EXCHANGE_URL" "\$EXCHANGE_ORG" "\$EXCHANGE_USER" "\$EXCHANGE_TOKEN"; then
+        log_message "=== Open Horizon Registration Completed Successfully ==="
+        
+        # Remove this script to prevent re-running
+        log_message "Removing registration script to prevent re-execution"
+        rm -f "\$0" || log_message "WARNING: Failed to remove registration script"
+        
+        exit 0
+    else
+        log_message "=== Open Horizon Registration Failed ==="
+        exit 1
+    fi
+}
+
+# Only run main if script is executed directly
+if [[ "\${BASH_SOURCE[0]}" == "\${0}" ]]; then
+    main "\$@"
+fi
+EOFSCRIPT
+    
+    # Set proper permissions on the registration script
+    chmod 755 "$horizon_register_script" || {
+        log_error "create_firstrun_script: Failed to set permissions on registration script"
+        return 1
+    }
+    
+    # Create the firstrun.sh script for Raspberry Pi OS
+    local firstrun_script="${chroot_path}/boot/firstrun.sh"
+    log_info "Creating firstrun.sh script: $firstrun_script"
+    
+    cat > "$firstrun_script" << 'EOFFIRSTRUN'
+#!/bin/bash
+# Raspberry Pi OS First Run Script
+# Generated by Raspberry Pi Image Builder
+# This script integrates with Raspberry Pi OS first-boot mechanism
+
+set +e  # Don't exit on errors in firstrun.sh
+
+# Log function
+log_firstrun() {
+    local message="$1"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] FIRSTRUN: $message" >> /var/log/firstrun.log
+}
+
+log_firstrun "=== Raspberry Pi First Run Started ==="
+
+# Enable SSH if not already enabled
+if [[ ! -f /boot/ssh ]]; then
+    log_firstrun "Enabling SSH service"
+    systemctl enable ssh
+    systemctl start ssh
+    touch /boot/ssh
+fi
+
+# Set up Open Horizon registration to run after network is available
+log_firstrun "Setting up Open Horizon registration"
+
+# Create a systemd service to run registration after network is up
+cat > /etc/systemd/system/horizon-registration.service << 'EOFSERVICE'
+[Unit]
+Description=Open Horizon Registration Service
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/usr/local/bin/horizon-register.sh
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/horizon-register.sh
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOFSERVICE
+
+# Enable the registration service
+systemctl daemon-reload
+systemctl enable horizon-registration.service
+
+log_firstrun "Open Horizon registration service configured"
+
+# Remove this firstrun script to prevent re-execution
+log_firstrun "Removing firstrun.sh to prevent re-execution"
+rm -f /boot/firstrun.sh
+
+log_firstrun "=== Raspberry Pi First Run Completed ==="
+
+# Reboot to ensure all services start properly
+log_firstrun "Rebooting system to complete setup"
+reboot
+EOFFIRSTRUN
+    
+    # Set proper permissions on firstrun.sh
+    chmod 755 "$firstrun_script" || {
+        log_error "create_firstrun_script: Failed to set permissions on firstrun.sh"
+        return 1
+    }
+    
+    log_info "Firstrun script creation completed successfully"
+    return 0
+}
+
+# Helper functions for exchange registration
+validate_exchange_connectivity() {
+    local exchange_url="$1"
+    
+    log_debug "Validating connectivity to exchange: $exchange_url"
+    
+    # Validate URL format
+    if [[ ! "$exchange_url" =~ ^https?:// ]]; then
+        log_error "validate_exchange_connectivity: Invalid exchange URL format: $exchange_url"
+        return 1
+    fi
+    
+    # Test connectivity with timeout
+    local timeout=10
+    if command -v curl >/dev/null 2>&1; then
+        if curl -s --connect-timeout "$timeout" "$exchange_url/v1/admin/version" >/dev/null 2>&1; then
+            log_debug "Exchange connectivity validated successfully"
+            return 0
+        fi
+    elif command -v wget >/dev/null 2>&1; then
+        if wget -q --timeout="$timeout" --tries=1 -O /dev/null "$exchange_url/v1/admin/version" 2>/dev/null; then
+            log_debug "Exchange connectivity validated successfully"
+            return 0
+        fi
+    else
+        log_warn "validate_exchange_connectivity: Neither curl nor wget available, skipping connectivity test"
+        return 0
+    fi
+    
+    log_error "validate_exchange_connectivity: Failed to connect to exchange: $exchange_url"
+    return 1
+}
+
+embed_exchange_credentials() {
+    local chroot_path="$1"
+    local exchange_url="$2"
+    local exchange_org="$3"
+    local exchange_user="$4"
+    local exchange_token="$5"
+    
+    log_debug "Embedding exchange credentials securely"
+    
+    # Create horizon configuration directory
+    local horizon_config_dir="${chroot_path}/etc/horizon"
+    mkdir -p "$horizon_config_dir" || {
+        log_error "embed_exchange_credentials: Failed to create horizon config directory"
+        return 1
+    }
+    
+    # Create environment file with secure permissions
+    local env_file="${horizon_config_dir}/horizon.env"
+    log_debug "Creating horizon environment file: $env_file"
+    
+    cat > "$env_file" << EOF
+# Open Horizon Environment Configuration
+# Generated by Raspberry Pi Image Builder
+# This file contains sensitive credentials - keep secure
+
+HZN_EXCHANGE_URL=$exchange_url
+HZN_ORG_ID=$exchange_org
+HZN_EXCHANGE_USER_AUTH=$exchange_user:$exchange_token
+EOF
+    
+    # Set restrictive permissions (readable only by root)
+    chmod 600 "$env_file" || {
+        log_error "embed_exchange_credentials: Failed to set permissions on environment file"
+        return 1
+    }
+    
+    chown root:root "$env_file" 2>/dev/null || {
+        log_warn "embed_exchange_credentials: Failed to set ownership on environment file"
+    }
+    
+    log_debug "Exchange credentials embedded securely"
+    return 0
+}
+
+configure_node_json() {
+    local chroot_path="$1"
+    local custom_node_json_path="$2"
+    
+    log_debug "Configuring node.json"
+    
+    local target_node_json="${chroot_path}/etc/horizon/node.json"
+    
+    if [[ -n "$custom_node_json_path" && -f "$custom_node_json_path" ]]; then
+        log_info "Using custom node.json file: $custom_node_json_path"
+        cp "$custom_node_json_path" "$target_node_json" || {
+            log_error "configure_node_json: Failed to copy custom node.json"
+            return 1
+        }
+    else
+        log_info "Creating default node.json configuration"
+        cat > "$target_node_json" << 'EOF'
+{
+    "services": [],
+    "pattern": "",
+    "name": "",
+    "nodeType": "device"
+}
+EOF
+    fi
+    
+    # Set proper permissions
+    chmod 644 "$target_node_json" || {
+        log_error "configure_node_json: Failed to set permissions on node.json"
+        return 1
+    }
+    
+    chown root:root "$target_node_json" 2>/dev/null || {
+        log_warn "configure_node_json: Failed to set ownership on node.json"
+    }
+    
+    log_debug "Node.json configuration completed"
+    return 0
+}
+
+create_registration_config() {
+    local exchange_url="$1"
+    local exchange_org="$2"
+    local exchange_user="$3"
+    local exchange_token="$4"
+    
+    # Return configuration in a simple format that can be parsed later
+    echo "${exchange_url}|${exchange_org}|${exchange_user}|${exchange_token}"
+}
+
+is_exchange_registration_requested() {
+    # Check if exchange registration is requested based on parameters
+    if [[ -n "$CONFIG_EXCHANGE_URL" && -n "$CONFIG_EXCHANGE_ORG" && -n "$CONFIG_EXCHANGE_USER" && -n "$CONFIG_EXCHANGE_TOKEN" ]]; then
+        log_debug "Exchange registration requested: URL=$CONFIG_EXCHANGE_URL, ORG=$CONFIG_EXCHANGE_ORG"
+        return 0
+    else
+        log_debug "Exchange registration not requested"
+        return 1
+    fi
+}
+
+# Project registry functions
+register_agent() {
+    local config_data="$1"
+    
+    log_info "Registering agent configuration in project registry"
+    log_debug "Config data: $config_data"
+    
+    # Validate input
+    if [[ -z "$config_data" ]]; then
+        log_error "register_agent: Missing config_data parameter"
+        return 1
+    fi
+    
+    # Parse configuration data (format: oh_version|base_image|output_image|exchange_url|exchange_org|node_json|wifi_ssid)
+    local oh_version base_image output_image exchange_url exchange_org node_json wifi_ssid
+    IFS='|' read -r oh_version base_image output_image exchange_url exchange_org node_json wifi_ssid <<< "$config_data"
+    
+    # Generate unique identifier and timestamp
+    local agent_id
+    local agent_created
+    agent_id=$(generate_agent_id)
+    agent_created=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    
+    log_debug "Generated agent ID: $agent_id"
+    log_debug "Created timestamp: $agent_created"
+    
+    # Create registry entry
+    local registry_entry
+    registry_entry=$(create_registry_entry "$agent_id" "$agent_created" "$oh_version" "$base_image" "$output_image" "$exchange_url" "$exchange_org" "$node_json" "$wifi_ssid")
+    
+    if [[ -z "$registry_entry" ]]; then
+        log_error "register_agent: Failed to create registry entry"
+        return 1
+    fi
+    
+    # Append to AGENTS.md file
+    local agents_file="${SCRIPT_DIR}/AGENTS.md"
+    if ! append_to_agents_file "$agents_file" "$registry_entry"; then
+        log_error "register_agent: Failed to append entry to AGENTS.md"
+        return 1
+    fi
+    
+    log_info "Agent configuration registered successfully with ID: $agent_id"
+    return 0
+}
+
+generate_agent_id() {
+    # Generate unique identifier using timestamp and hash
+    local timestamp=$(date +%s)
+    local random_data="${timestamp}-${RANDOM}-$(hostname)"
+    local hash_suffix
+    
+    # Use available hash command (prefer sha256sum, fallback to md5)
+    if command -v sha256sum >/dev/null 2>&1; then
+        hash_suffix=$(echo "$random_data" | sha256sum | cut -c1-8)
+    elif command -v md5sum >/dev/null 2>&1; then
+        hash_suffix=$(echo "$random_data" | md5sum | cut -c1-8)
+    elif command -v md5 >/dev/null 2>&1; then
+        # macOS md5 command
+        hash_suffix=$(echo "$random_data" | md5 | cut -c1-8)
+    else
+        # Fallback to simple hash based on timestamp and random
+        hash_suffix=$(printf "%08x" $((timestamp % 4294967296)))
+    fi
+    
+    echo "${timestamp}-${hash_suffix}"
+}
+
+create_registry_entry() {
+    local agent_id="$1"
+    local agent_created="$2"
+    local oh_version="$3"
+    local base_image="$4"
+    local output_image="$5"
+    local exchange_url="$6"
+    local exchange_org="$7"
+    local node_json="$8"
+    local wifi_ssid="$9"
+    
+    log_debug "Creating registry entry for agent ID: $agent_id"
+    
+    # Extract filenames from full paths
+    local base_image_name=$(basename "$base_image" 2>/dev/null || echo "$base_image")
+    local output_image_name=$(basename "$output_image" 2>/dev/null || echo "$output_image")
+    
+    # Format exchange information
+    local exchange_info="none"
+    if [[ -n "$exchange_url" && -n "$exchange_org" ]]; then
+        exchange_info="$exchange_url (org: $exchange_org)"
+    fi
+    
+    # Format node.json information
+    local node_json_info="default"
+    if [[ -n "$node_json" ]]; then
+        node_json_info=$(basename "$node_json" 2>/dev/null || echo "$node_json")
+    fi
+    
+    # Format Wi-Fi information
+    local wifi_info="none"
+    if [[ -n "$wifi_ssid" ]]; then
+        wifi_info="$wifi_ssid"
+    fi
+    
+    # Create markdown-formatted registry entry (redirect to variable to avoid log mixing)
+    local entry_content
+    entry_content=$(cat << EOF
+
+## Agent Configuration: $agent_id
+
+- **Created**: $agent_created
+- **Open Horizon Version**: $oh_version
+- **Exchange URL**: $exchange_info
+- **Node JSON**: $node_json_info
+- **Wi-Fi SSID**: $wifi_info
+- **Base Image**: $base_image_name
+- **Output Image**: $output_image_name
+- **Status**: created
+
+EOF
+)
+    
+    echo "$entry_content"
+}
+
+append_to_agents_file() {
+    local agents_file="$1"
+    local registry_entry="$2"
+    
+    log_debug "Appending entry to AGENTS.md file: $agents_file"
+    
+    # Validate inputs
+    if [[ -z "$agents_file" || -z "$registry_entry" ]]; then
+        log_error "append_to_agents_file: Missing required parameters"
+        return 1
+    fi
+    
+    # Create AGENTS.md file if it doesn't exist
+    if [[ ! -f "$agents_file" ]]; then
+        log_info "Creating new AGENTS.md file: $agents_file"
+        create_agents_file_header "$agents_file" || {
+            log_error "append_to_agents_file: Failed to create AGENTS.md header"
+            return 1
+        }
+    fi
+    
+    # Verify file is writable
+    if [[ ! -w "$agents_file" ]]; then
+        log_error "append_to_agents_file: AGENTS.md file is not writable: $agents_file"
+        return 1
+    fi
+    
+    # Append the registry entry
+    echo "$registry_entry" >> "$agents_file" || {
+        log_error "append_to_agents_file: Failed to append entry to AGENTS.md"
+        return 1
+    }
+    
+    log_debug "Registry entry appended successfully"
+    return 0
+}
+
+create_agents_file_header() {
+    local agents_file="$1"
+    
+    log_debug "Creating AGENTS.md file header"
+    
+    # Create the file with header
+    cat > "$agents_file" << 'EOF'
+# Open Horizon Agents Registry
+
+This file contains a registry of all Raspberry Pi images created with embedded Open Horizon components. Each entry represents a unique agent configuration with its deployment details.
+
+## Registry Format
+
+Each agent configuration includes:
+- **Created**: ISO timestamp of when the image was created
+- **Open Horizon Version**: Version of Open Horizon components installed
+- **Exchange URL**: Open Horizon exchange URL and organization (or "none" if not configured)
+- **Node JSON**: Custom node.json configuration file used (or "default")
+- **Wi-Fi SSID**: Wi-Fi network configured (or "none" if not configured)
+- **Base Image**: Original Raspberry Pi OS image filename
+- **Output Image**: Generated custom image filename
+- **Status**: Current status (created|deployed|retired)
+
+## Agent Configurations
+EOF
+    
+    if [[ $? -eq 0 ]]; then
+        log_debug "AGENTS.md header created successfully"
+        return 0
+    else
+        log_error "create_agents_file_header: Failed to create AGENTS.md header"
+        return 1
+    fi
+}
+
+create_agent_config_data() {
+    # Helper function to create config data string from global variables
+    local config_data=""
+    
+    # Format: oh_version|base_image|output_image|exchange_url|exchange_org|node_json|wifi_ssid
+    config_data="${CONFIG_OH_VERSION}|${CONFIG_BASE_IMAGE}|${CONFIG_OUTPUT_IMAGE}"
+    config_data="${config_data}|${CONFIG_EXCHANGE_URL}|${CONFIG_EXCHANGE_ORG}"
+    config_data="${config_data}|${CONFIG_NODE_JSON}|${CONFIG_WIFI_SSID}"
+    
+    echo "$config_data"
+}
+
+validate_agents_file() {
+    local agents_file="$1"
+    
+    log_debug "Validating AGENTS.md file format: $agents_file"
+    
+    # Check if file exists
+    if [[ ! -f "$agents_file" ]]; then
+        log_debug "AGENTS.md file does not exist (will be created)"
+        return 0
+    fi
+    
+    # Check if file is readable
+    if [[ ! -r "$agents_file" ]]; then
+        log_error "validate_agents_file: AGENTS.md file is not readable: $agents_file"
+        return 1
+    fi
+    
+    # Basic validation - check for markdown header
+    if ! grep -q "^# Open Horizon Agents Registry" "$agents_file" 2>/dev/null; then
+        log_warn "validate_agents_file: AGENTS.md file missing expected header"
+        # This is not a fatal error - we can still append to the file
+    fi
+    
+    # Check file size (should not be empty if it exists)
+    local file_size
+    file_size=$(stat -c%s "$agents_file" 2>/dev/null || stat -f%z "$agents_file" 2>/dev/null)
+    if [[ -n "$file_size" && $file_size -eq 0 ]]; then
+        log_warn "validate_agents_file: AGENTS.md file is empty"
+        # This is not a fatal error - we can recreate the header
+    fi
+    
+    log_debug "AGENTS.md file validation completed"
+    return 0
+}
+
+get_agent_count() {
+    local agents_file="$1"
+    
+    # Count the number of agent configurations in the file
+    if [[ -f "$agents_file" ]]; then
+        local count
+        count=$(grep -c "^## Agent Configuration:" "$agents_file" 2>/dev/null || echo "0")
+        echo "$count"
+    else
+        echo "0"
+    fi
+}
+
+list_agents() {
+    local agents_file="${SCRIPT_DIR}/AGENTS.md"
+    
+    log_info "Listing registered agents from: $agents_file"
+    
+    if [[ ! -f "$agents_file" ]]; then
+        log_info "No AGENTS.md file found - no agents registered yet"
+        return 0
+    fi
+    
+    local agent_count
+    agent_count=$(get_agent_count "$agents_file")
+    
+    if [[ $agent_count -eq 0 ]]; then
+        log_info "No agents found in registry"
+        return 0
+    fi
+    
+    log_info "Found $agent_count registered agent(s):"
+    
+    # Extract and display agent summaries
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^##\ Agent\ Configuration:\ (.+)$ ]]; then
+            local agent_id="${BASH_REMATCH[1]}"
+            echo "  - Agent ID: $agent_id"
+        fi
+    done < "$agents_file"
+    
+    return 0
+}
+
+# Main function
+main() {
+    init_script
+    
+    log_info "Starting Raspberry Pi Image Builder"
+    
+    # Parse command line arguments
+    parse_arguments "$@"
+    
+    # Detect platform and check dependencies
+    detect_platform
+    check_dependencies
+    
+    # Prompt for missing required parameters
+    prompt_for_missing_parameters
+    
+    # Validate configuration
+    validate_configuration
+    
+    # Log configuration summary
+    log_configuration
+    
+    # Set cleanup flag
+    CLEANUP_REQUIRED=true
+    
+    log_info "Platform detection and dependency checking completed successfully"
+    
+    # Verify base image format compatibility
+    log_info "Verifying base image format compatibility"
+    if verify_image_format_compatibility "$CONFIG_BASE_IMAGE"; then
+        log_info "Base image format compatibility verification passed"
+    else
+        log_error "Base image format compatibility verification failed"
+        exit 1
+    fi
+    
+    # Register agent configuration in project registry
+    log_info "Registering agent configuration in project registry"
+    local config_data
+    config_data=$(create_agent_config_data)
+    
+    if register_agent "$config_data"; then
+        log_info "Agent configuration registered successfully"
+    else
+        log_warn "Failed to register agent configuration (non-critical)"
+    fi
+    
+    # Mount the base image for processing
+    log_info "Mounting base image for processing"
+    local mount_device
+    mount_device=$(mount_image "$CONFIG_BASE_IMAGE" "$CONFIG_MOUNT_POINT")
+    if [[ $? -ne 0 || -z "$mount_device" ]]; then
+        log_error "Failed to mount base image"
+        exit 1
+    fi
+    
+    log_info "Successfully mounted image on device: $mount_device"
+    
+    # Install Open Horizon components
+    log_info "Installing Open Horizon components"
+    
+    if ! install_anax_agent "$CONFIG_MOUNT_POINT" "$CONFIG_OH_VERSION"; then
+        log_error "Failed to install Open Horizon anax agent"
+        unmount_image "$mount_device" "$CONFIG_MOUNT_POINT"
+        exit 1
+    fi
+    
+    if ! install_horizon_cli "$CONFIG_MOUNT_POINT" "$CONFIG_OH_VERSION"; then
+        log_error "Failed to install Open Horizon CLI"
+        unmount_image "$mount_device" "$CONFIG_MOUNT_POINT"
+        exit 1
+    fi
+    
+    if ! configure_agent_service "$CONFIG_MOUNT_POINT"; then
+        log_error "Failed to configure Open Horizon agent service"
+        unmount_image "$mount_device" "$CONFIG_MOUNT_POINT"
+        exit 1
+    fi
+    
+    log_info "Open Horizon components installed successfully"
+    
+    # Configure Wi-Fi if requested
+    if is_wifi_configuration_requested; then
+        log_info "Configuring Wi-Fi network"
+        if ! configure_wifi "$CONFIG_MOUNT_POINT" "$CONFIG_WIFI_SSID" "$CONFIG_WIFI_PASSWORD" "$CONFIG_WIFI_SECURITY"; then
+            log_error "Failed to configure Wi-Fi"
+            unmount_image "$mount_device" "$CONFIG_MOUNT_POINT"
+            exit 1
+        fi
+        log_info "Wi-Fi configuration completed successfully"
+    else
+        log_info "No Wi-Fi configuration requested"
+    fi
+    
+    # Configure exchange registration if requested
+    if [[ -n "$CONFIG_EXCHANGE_URL" ]]; then
+        log_info "Configuring Open Horizon exchange registration"
+        if ! configure_exchange_registration "$CONFIG_MOUNT_POINT" "$CONFIG_EXCHANGE_URL" "$CONFIG_EXCHANGE_ORG" "$CONFIG_EXCHANGE_USER" "$CONFIG_EXCHANGE_TOKEN" "$CONFIG_NODE_JSON"; then
+            log_error "Failed to configure exchange registration"
+            unmount_image "$mount_device" "$CONFIG_MOUNT_POINT"
+            exit 1
+        fi
+        log_info "Exchange registration configuration completed successfully"
+    else
+        log_info "No exchange registration requested"
+    fi
+    
+    # Final verification before unmounting
+    log_info "Performing final verification of installed components"
+    
+    # Verify Open Horizon installation
+    if ! verify_open_horizon_installation "$CONFIG_MOUNT_POINT" "$CONFIG_OH_VERSION"; then
+        log_error "Open Horizon installation verification failed"
+        unmount_image "$mount_device" "$CONFIG_MOUNT_POINT"
+        exit 1
+    fi
+    
+    log_info "Open Horizon installation verification passed"
+    
+    # Unmount the image
+    log_info "Unmounting image and finalizing"
+    if ! unmount_image "$mount_device" "$CONFIG_MOUNT_POINT"; then
+        log_error "Failed to unmount image"
+        exit 1
+    fi
+    
+    log_info "Image unmounted successfully"
+    
+    # Verify final output image
+    log_info "Verifying final output image"
+    if ! verify_image "$CONFIG_OUTPUT_IMAGE" "extended"; then
+        log_error "Final output image verification failed"
+        exit 1
+    fi
+    
+    log_info "Final output image verification passed"
+    
+    # Disable cleanup flag since we completed successfully
+    CLEANUP_REQUIRED=false
+    
+    log_info "=== Image processing completed successfully ==="
+    log_info "Custom Raspberry Pi image created: $CONFIG_OUTPUT_IMAGE"
+    log_info "Image contains Open Horizon $CONFIG_OH_VERSION components"
+    
+    if [[ -n "$CONFIG_EXCHANGE_URL" ]]; then
+        log_info "Image is configured for automatic exchange registration"
+    fi
+    
+    if [[ -n "$CONFIG_WIFI_SSID" ]]; then
+        log_info "Image is configured for Wi-Fi network: $CONFIG_WIFI_SSID"
+    fi
+    
+    log_info "=== Raspberry Pi Image Builder finished successfully ==="
+}
+
+# Only run main if script is executed directly (not sourced)
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

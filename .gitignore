@@ -1,0 +1,25 @@
+# Log files
+*.log
+lib/*.log
+build-rpi-image.log
+
+# Temporary files
+*.tmp
+*.swp
+*~
+
+# Test artifacts
+test/integration/logs/
+test/integration/results/
+test/integration/test_data/*.img
+
+# Build artifacts
+*.img
+*.deb
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
