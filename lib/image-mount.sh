@@ -7,7 +7,7 @@
 set -euo pipefail
 
 # Global variables
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DETECTED_PLATFORM=""
 MOUNTED_DEVICES=()
 LOG_FILE=""
