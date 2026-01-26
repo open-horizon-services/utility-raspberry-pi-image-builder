@@ -184,6 +184,10 @@ check_dependencies() {
     # Filter tools based on category
     case "$check_categories" in
         all)
+            # Ensure PLATFORM_TOOLS is initialized
+            if [[ -z "${PLATFORM_TOOLS+x}" ]] || [[ ${#PLATFORM_TOOLS[@]} -eq 0 ]]; then
+                select_platform_tools
+            fi
             tools_to_check=("${PLATFORM_TOOLS[@]}")
             ;;
         core)
@@ -635,7 +639,7 @@ get_platform_info() {
 }
 
 # CLI interface
-show_usage() {
+platform_detect_show_usage() {
     cat << EOF
 Platform Detection Utility
 
@@ -678,11 +682,11 @@ main() {
             get_platform_info
             ;;
         help|--help|-h)
-            show_usage
+            platform_detect_show_usage
             ;;
         *)
             log_error "Unknown command: $command"
-            show_usage
+            platform_detect_show_usage
             exit 1
             ;;
     esac

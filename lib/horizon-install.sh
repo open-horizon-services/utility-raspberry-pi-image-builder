@@ -1265,7 +1265,7 @@ create_registration_config() {
 }
 
 # Show usage information
-show_usage() {
+horizon_install_horizon_install_show_usage() {
     cat << 'EOF'
 Open Horizon Installation Library
 
@@ -1327,7 +1327,7 @@ main() {
             
             if [[ -z "$chroot_path" || -z "$version" ]]; then
                 log_error "Missing required parameters for install command"
-                show_usage
+                horizon_install_show_usage
                 exit 1
             fi
             
@@ -1349,7 +1349,7 @@ main() {
             
             if [[ -z "$chroot_path" || -z "$version" ]]; then
                 log_error "Missing required parameters for verify command"
-                show_usage
+                horizon_install_show_usage
                 exit 1
             fi
             
@@ -1373,18 +1373,18 @@ main() {
             
             if [[ -z "$chroot_path" || -z "$exchange_url" || -z "$exchange_org" || -z "$exchange_user" || -z "$exchange_token" ]]; then
                 log_error "Missing required parameters for register command"
-                show_usage
+                horizon_install_show_usage
                 exit 1
             fi
             
             configure_exchange_registration "$chroot_path" "$exchange_url" "$exchange_org" "$exchange_user" "$exchange_token" "$node_json_path"
             ;;
         help|--help|-h)
-            show_usage
+            horizon_install_show_usage
             ;;
         *)
             log_error "Unknown command: $command"
-            show_usage
+            horizon_install_show_usage
             exit 1
             ;;
     esac

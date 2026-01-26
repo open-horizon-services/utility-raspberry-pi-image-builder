@@ -587,7 +587,7 @@ verify_filesystem_structure() {
 }
 
 # CLI interface
-show_usage() {
+image_verify_image_verify_show_usage() {
     cat << EOF
 Image Verification Utility
 
@@ -623,7 +623,7 @@ main() {
         verify)
             if [[ $# -lt 2 ]]; then
                 log_error "verify command requires at least 1 argument: <image_path> [type]"
-                show_usage
+                image_verify_show_usage
                 exit 1
             fi
             verify_image "$2" "${3:-basic}"
@@ -631,7 +631,7 @@ main() {
         compatibility)
             if [[ $# -ne 2 ]]; then
                 log_error "compatibility command requires 1 argument: <image_path>"
-                show_usage
+                image_verify_show_usage
                 exit 1
             fi
             verify_image_format_compatibility "$2"
@@ -639,17 +639,17 @@ main() {
         structure)
             if [[ $# -ne 2 ]]; then
                 log_error "structure command requires 1 argument: <image_path>"
-                show_usage
+                image_verify_show_usage
                 exit 1
             fi
             verify_partition_structure "$2"
             ;;
         help|--help|-h)
-            show_usage
+            image_verify_show_usage
             ;;
         *)
             log_error "Unknown command: $command"
-            show_usage
+            image_verify_show_usage
             exit 1
             ;;
     esac

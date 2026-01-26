@@ -237,7 +237,7 @@ cleanup_chroot_mounts() {
 }
 
 # Show usage information
-show_usage() {
+chroot_utils_chroot_utils_show_usage() {
     cat << EOF
 USAGE: $(basename "$0") <command> [options]
 
@@ -283,7 +283,7 @@ main() {
         setup)
             if [[ $# -lt 2 ]]; then
                 log_error "Missing chroot_path parameter"
-                show_usage
+                chroot_utils_show_usage
                 exit 1
             fi
             setup_chroot_environment "$2"
@@ -291,7 +291,7 @@ main() {
         exec)
             if [[ $# -lt 3 ]]; then
                 log_error "Missing chroot_path or command parameter"
-                show_usage
+                chroot_utils_show_usage
                 exit 1
             fi
             chroot_exec "$2" "$3"
@@ -299,18 +299,18 @@ main() {
         cleanup)
             if [[ $# -lt 2 ]]; then
                 log_error "Missing chroot_path parameter"
-                show_usage
+                chroot_utils_show_usage
                 exit 1
             fi
             cleanup_chroot_mounts "$2"
             ;;
         help|--help|-h|"")
-            show_usage
+            chroot_utils_show_usage
             exit 0
             ;;
         *)
             log_error "Unknown command: $command"
-            show_usage
+            chroot_utils_show_usage
             exit 1
             ;;
     esac

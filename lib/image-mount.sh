@@ -402,7 +402,7 @@ cleanup_mounts() {
 }
 
 # CLI interface
-show_usage() {
+image_mount_image_mount_show_usage() {
     cat << EOF
 Image Mount Utility
 
@@ -440,7 +440,7 @@ main() {
         mount)
             if [[ $# -ne 3 ]]; then
                 log_error "mount command requires 2 arguments: <image_path> <mount_point>"
-                show_usage
+                image_mount_show_usage
                 exit 1
             fi
             mount_image "$2" "$3"
@@ -448,7 +448,7 @@ main() {
         unmount)
             if [[ $# -ne 3 ]]; then
                 log_error "unmount command requires 2 arguments: <device> <mount_point>"
-                show_usage
+                image_mount_show_usage
                 exit 1
             fi
             unmount_image "$2" "$3"
@@ -457,11 +457,11 @@ main() {
             list_mounted_images
             ;;
         help|--help|-h)
-            show_usage
+            image_mount_show_usage
             ;;
         *)
             log_error "Unknown command: $command"
-            show_usage
+            image_mount_show_usage
             exit 1
             ;;
     esac

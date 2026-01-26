@@ -354,7 +354,7 @@ EOF
 }
 
 # Show usage information
-show_usage() {
+network_config_network_config_show_usage() {
     cat << EOF
 USAGE: $(basename "$0") <command> [options]
 
@@ -409,7 +409,7 @@ main() {
         wifi)
             if [[ $# -lt 4 ]]; then
                 log_error "Missing parameters for wifi command"
-                show_usage
+                network_config_show_usage
                 exit 1
             fi
             configure_wifi "$2" "$3" "$4" "${5:-WPA2}"
@@ -417,7 +417,7 @@ main() {
         validate)
             if [[ $# -lt 4 ]]; then
                 log_error "Missing parameters for validate command"
-                show_usage
+                network_config_show_usage
                 exit 1
             fi
             validate_wifi_configuration "$2" "$3" "$4"
@@ -425,18 +425,18 @@ main() {
         fallback)
             if [[ $# -lt 2 ]]; then
                 log_error "Missing chroot_path parameter"
-                show_usage
+                network_config_show_usage
                 exit 1
             fi
             configure_network_fallback "$2"
             ;;
         help|--help|-h|"")
-            show_usage
+            network_config_show_usage
             exit 0
             ;;
         *)
             log_error "Unknown command: $command"
-            show_usage
+            network_config_show_usage
             exit 1
             ;;
     esac

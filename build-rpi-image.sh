@@ -1029,14 +1029,32 @@ generate_agent_id() {
 
 create_registry_entry() {
     local agent_id="$1"
-    local agent_created="$2"
-    local oh_version="$3"
-    local base_image="$4"
-    local output_image="$5"
-    local exchange_url="$6"
-    local exchange_org="$7"
-    local node_json="$8"
-    local wifi_ssid="$9"
+    
+    # Handle both calling patterns:
+    # Pattern 1: create_registry_entry "$agent_id" "$config_data" 
+    # Pattern 2: create_registry_entry "$agent_id" "$agent_created" "$oh_version" "$base_image" "$output_image" "$exchange_url" "$exchange_org" "$node_json" "$wifi_ssid"
+    
+    local agent_created oh_version base_image output_image exchange_url exchange_org node_json wifi_ssid
+    
+    if [[ $# -eq 2 ]]; then
+        # Pattern 1: Parse config_data string (format: oh_version|base_image|output_image|exchange_url|exchange_org|node_json|wifi_ssid)
+        local config_data="$2"
+        agent_created=$(date '+%Y-%m-%d %H:%M:%S')
+        IFS='|' read -r oh_version base_image output_image exchange_url exchange_org node_json wifi_ssid <<< "$config_data"
+    elif [[ $# -eq 9 ]]; then
+        # Pattern 2: Direct parameters
+        agent_created="$2"
+        oh_version="$3"
+        base_image="$4"
+        output_image="$5"
+        exchange_url="$6"
+        exchange_org="$7"
+        node_json="$8"
+        wifi_ssid="$9"
+    else
+        log_error "create_registry_entry: Invalid parameter count. Expected 2 or 9 parameters, got $#"
+        return 1
+    fi
     
     log_debug "Creating registry entry for agent ID: $agent_id"
     
@@ -1283,6 +1301,7 @@ main() {
     
     # Detect platform and check dependencies
     detect_platform
+    select_platform_tools
     check_dependencies
     
     # Prompt for missing required parameters
