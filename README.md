@@ -193,11 +193,6 @@ bats test/unit/ 2>&1 | grep -c "^not ok"    # Failing
 
 **Test Suite:** 20 CLI tests covering argument parsing, validation, and configuration.
 
-**Known Issues:** Some tests fail due to [known bugs](KNOWN-ISSUES.md):
-- Help output shows library help instead of main script help (Issue #2)
-- macOS has PLATFORM_TOOLS initialization bug (Issue #1)
-- Tests require BATS 1.5.0+ (Linux apt version may be older)
-
 **Linux Note:** Ubuntu's default BATS (1.2.1) is outdated. For full test support:
 ```bash
 # Install latest BATS from source on Linux

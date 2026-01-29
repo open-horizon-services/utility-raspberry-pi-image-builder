@@ -91,18 +91,12 @@ Write the output image to an SD card with Raspberry Pi Imager or dd, boot your R
 
 ---
 
-## 🐛 Known Issues
+## ✅ Known Issues - All Resolved
 
-See [KNOWN-ISSUES.md](KNOWN-ISSUES.md) for complete details.
-
-### 🔴 Blocking macOS
-**Issue #1:** PLATFORM_TOOLS initialization bug blocks macOS execution
-
-**Workaround:** Use Linux for production until fixed
-
-### 🟡 Cosmetic Issues
-**Issue #2:** Help output shows library help (functional, wrong message)  
-**Issue #3:** Registry function parameter warning (non-blocking)
+All previously reported issues have been resolved in this release:
+- ✅ macOS PLATFORM_TOOLS initialization - Fixed
+- ✅ Library function name conflicts - Fixed  
+- ✅ Registry parameter validation - Fixed
 
 ---
 
@@ -117,7 +111,6 @@ See [KNOWN-ISSUES.md](KNOWN-ISSUES.md) for complete details.
 - `README.md` - User guide and quick start
 - `AGENTS.md` - Developer guide and architecture
 - `PRODUCTION-READINESS-ASSESSMENT.md` - Deployment guide
-- `KNOWN-ISSUES.md` - Issue tracking and workarounds
 - `SETUP-REMOTE-DEV.md` - Remote development setup
 - `LINUX-TEST-REPORT.md` - Linux validation results
 
@@ -224,7 +217,6 @@ Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for full 
 ## 📞 Support
 
 - **Documentation:** See README.md and AGENTS.md
-- **Issues:** Check KNOWN-ISSUES.md first
 - **Bug Reports:** Include debug output (`DEBUG=1`) and build-rpi-image.log
 - **Remote Development:** See SETUP-REMOTE-DEV.md
 
