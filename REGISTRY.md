@@ -48,3 +48,75 @@ Each agent configuration includes:
 - **Base Image**: test-image.img
 - **Output Image**: test-output.img
 - **Status**: created
+
+## Agent Configuration: 1770676979-b016e488
+
+- **Created**: 2026-02-09 17:42:59
+- **Open Horizon Version**: 2.32.0-1753
+- **Exchange URL**: none
+- **Node JSON**: default
+- **Wi-Fi SSID**: none
+- **Base Image**: 2025-12-04-raspios-trixie-arm64-lite.img
+- **Output Image**: custom-rpi.img
+- **Status**: created
+
+## Agent Configuration: 1770676979-b016e488
+
+- **Created**: 2026-02-09 17:42:59
+- **Open Horizon Version**: 2.32.0-1753
+- **Exchange URL**: none
+- **Node JSON**: default
+- **Wi-Fi SSID**: none
+- **Base Image**: 2025-12-04-raspios-trixie-arm64-lite.img
+- **Output Image**: custom-rpi.img
+- **Status**: created
+
+
+## Agent Configuration: 1770682332-f483f809
+
+- **Created**: 2026-02-09 19:12:12
+- **Open Horizon Version**: 2.32.0-1753
+- **Exchange URL**: none
+- **Node JSON**: default
+- **Wi-Fi SSID**: none
+- **Base Image**: 2025-12-04-raspios-trixie-arm64-lite.img
+- **Output Image**: custom-rpi.img
+- **Status**: created
+
+## Agent Configuration: 1770682332-f483f809
+
+- **Created**: 2026-02-09 19:12:12
+- **Open Horizon Version**: 2.32.0-1753
+- **Exchange URL**: none
+- **Node JSON**: default
+- **Wi-Fi SSID**: none
+- **Base Image**: 2025-12-04-raspios-trixie-arm64-lite.img
+- **Output Image**: custom-rpi.img
+- **Status**: created
+
+[2026-02-09 19:15:43] DEBUG: Creating registry entry for agent ID: 1770682543-09935ab0
+[2026-02-09 19:15:43] DEBUG: Creating registry entry for agent ID: 1770682543-09935ab0
+
+## Agent Configuration: 1770682543-09935ab0
+
+- **Created**: 2026-02-09 19:15:43
+- **Open Horizon Version**: 2.32.0-1753
+- **Exchange URL**: none
+- **Node JSON**: default
+- **Wi-Fi SSID**: none
+- **Base Image**: 2025-12-04-raspios-trixie-arm64-lite.img
+- **Output Image**: custom-rpi.img
+- **Status**: created
+[2026-02-09 19:15:43] DEBUG: Creating registry entry for agent ID: 1770682543-09935ab0
+[2026-02-09 19:15:43] DEBUG: Creating registry entry for agent ID: 1770682543-09935ab0
+
+## Agent Configuration: 1770682543-09935ab0
+
+- **Created**: 2026-02-09 19:15:43
+- **Open Horizon Version**: 2.32.0-1753
+- **Exchange URL**: none
+- **Node JSON**: default
+- **Wi-Fi SSID**: none
+- **Base Image**: 2025-12-04-raspios-trixie-arm64-lite.img
+- **Output Image**: custom-rpi.img
+- **Status**: created

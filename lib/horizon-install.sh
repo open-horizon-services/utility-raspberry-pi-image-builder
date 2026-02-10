@@ -23,28 +23,44 @@ init_logging() {
 log_info() {
     local message="$1"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[$timestamp] INFO: $message" | tee -a "${LOG_FILE:-/dev/stdout}"
+    if [[ -n "${LOG_FILE:-}" ]]; then
+        echo "[$timestamp] INFO: $message" | tee -a "$LOG_FILE"
+    else
+        echo "[$timestamp] INFO: $message"
+    fi
 }
 
 log_warn() {
     local message="$1"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[$timestamp] WARN: $message" | tee -a "${LOG_FILE:-/dev/stdout}" >&2
+    if [[ -n "${LOG_FILE:-}" ]]; then
+        echo "[$timestamp] WARN: $message" | tee -a "$LOG_FILE" >&2
+    else
+        echo "[$timestamp] WARN: $message" >&2
+    fi
 }
 
 log_error() {
     local message="$1"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[$timestamp] ERROR: $message" | tee -a "${LOG_FILE:-/dev/stdout}" >&2
+    if [[ -n "${LOG_FILE:-}" ]]; then
+        echo "[$timestamp] ERROR: $message" | tee -a "$LOG_FILE" >&2
+    else
+        echo "[$timestamp] ERROR: $message" >&2
+    fi
 }
 
 log_debug() {
     local message="$1"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     if [[ "${DEBUG:-}" == "1" ]]; then
-        echo "[$timestamp] DEBUG: $message" | tee -a "${LOG_FILE:-/dev/stdout}"
-    else
-        echo "[$timestamp] DEBUG: $message" >> "${LOG_FILE:-/dev/null}"
+        if [[ -n "${LOG_FILE:-}" ]]; then
+            echo "[$timestamp] DEBUG: $message" | tee -a "$LOG_FILE"
+        else
+            echo "[$timestamp] DEBUG: $message"
+        fi
+    elif [[ -n "${LOG_FILE:-}" ]]; then
+        echo "[$timestamp] DEBUG: $message" >> "$LOG_FILE"
     fi
 }
 
@@ -335,8 +351,8 @@ install_anax_agent() {
     }
     
     # Download and install anax agent
-    local anax_package_url="https://github.com/open-horizon/anax/releases/download/v${version}/horizon_${version}_arm64.deb"
-    local anax_package_file="horizon_${version}_arm64.deb"
+    local anax_package_url="https://github.com/open-horizon/anax/releases/download/v${version}/horizon-agent-linux-deb-arm64.tar.gz"
+    local anax_package_file="horizon-agent-linux-deb-arm64.tar.gz"
     local temp_dir="${chroot_path}/tmp/horizon_install"
     
     log_debug "Creating temporary installation directory: $temp_dir"
@@ -372,6 +388,29 @@ install_anax_agent() {
     package_size=$(stat -c%s "${temp_dir}/${anax_package_file}" 2>/dev/null || stat -f%z "${temp_dir}/${anax_package_file}" 2>/dev/null)
     log_debug "Downloaded package size: $package_size bytes"
     
+    # Extract the tar.gz archive to get the .deb package
+    log_info "Extracting anax agent package archive"
+    cd "$temp_dir" || {
+        log_error "install_anax_agent: Failed to change to temp directory"
+        return 1
+    }
+    
+    tar -xzf "$anax_package_file" || {
+        log_error "install_anax_agent: Failed to extract anax package archive"
+        return 1
+    }
+    
+    # Find the .deb file in the extracted archive
+    local deb_file
+    deb_file=$(find "$temp_dir" -name "*.deb" -type f | head -1)
+    
+    if [[ -z "$deb_file" || ! -f "$deb_file" ]]; then
+        log_error "install_anax_agent: No .deb file found in extracted archive"
+        return 1
+    fi
+    
+    log_debug "Found .deb package: $(basename "$deb_file")"
+    
     # Install package in chroot environment
     log_info "Installing anax agent package in chroot environment"
     
@@ -388,8 +427,14 @@ install_anax_agent() {
         return 1
     }
     
+    # Copy the .deb file into the chroot for installation
+    cp "$deb_file" "${temp_dir}/horizon-agent.deb" || {
+        log_error "install_anax_agent: Failed to copy .deb file to chroot"
+        return 1
+    }
+    
     # Install the anax package
-    chroot_exec "$chroot_path" "dpkg -i /tmp/horizon_install/${anax_package_file}" || {
+    chroot_exec "$chroot_path" "dpkg -i /tmp/horizon_install/horizon-agent.deb" || {
         log_warn "install_anax_agent: dpkg install failed, attempting to fix dependencies"
         chroot_exec "$chroot_path" "apt-get install -f -y" || {
             log_error "install_anax_agent: Failed to fix dependencies"
@@ -450,8 +495,8 @@ install_horizon_cli() {
     }
     
     # Download and install Horizon CLI
-    local cli_package_url="https://github.com/open-horizon/anax/releases/download/v${version}/horizon-cli_${version}_arm64.deb"
-    local cli_package_file="horizon-cli_${version}_arm64.deb"
+    local cli_package_url="https://github.com/open-horizon/anax/releases/download/v${version}/horizon-cli-linux-deb-arm64.tar.gz"
+    local cli_package_file="horizon-cli-linux-deb-arm64.tar.gz"
     local temp_dir="${chroot_path}/tmp/horizon_cli_install"
     
     log_debug "Creating temporary CLI installation directory: $temp_dir"
@@ -487,11 +532,40 @@ install_horizon_cli() {
     package_size=$(stat -c%s "${temp_dir}/${cli_package_file}" 2>/dev/null || stat -f%z "${temp_dir}/${cli_package_file}" 2>/dev/null)
     log_debug "Downloaded CLI package size: $package_size bytes"
     
+    # Extract the tar.gz archive to get the .deb package
+    log_info "Extracting Horizon CLI package archive"
+    cd "$temp_dir" || {
+        log_error "install_horizon_cli: Failed to change to temp directory"
+        return 1
+    }
+    
+    tar -xzf "$cli_package_file" || {
+        log_error "install_horizon_cli: Failed to extract CLI package archive"
+        return 1
+    }
+    
+    # Find the .deb file in the extracted archive
+    local cli_deb_file
+    cli_deb_file=$(find "$temp_dir" -name "*.deb" -type f | head -1)
+    
+    if [[ -z "$cli_deb_file" || ! -f "$cli_deb_file" ]]; then
+        log_error "install_horizon_cli: No .deb file found in extracted CLI archive"
+        return 1
+    fi
+    
+    log_debug "Found CLI .deb package: $(basename "$cli_deb_file")"
+    
     # Install CLI package in chroot environment
     log_info "Installing Horizon CLI package in chroot environment"
     
+    # Copy the .deb file into the chroot for installation
+    cp "$cli_deb_file" "${temp_dir}/horizon-cli.deb" || {
+        log_error "install_horizon_cli: Failed to copy CLI .deb file to chroot"
+        return 1
+    }
+    
     # Install the CLI package
-    chroot_exec "$chroot_path" "dpkg -i /tmp/horizon_cli_install/${cli_package_file}" || {
+    chroot_exec "$chroot_path" "dpkg -i /tmp/horizon_cli_install/horizon-cli.deb" || {
         log_warn "install_horizon_cli: dpkg install failed, attempting to fix dependencies"
         chroot_exec "$chroot_path" "apt-get install -f -y" || {
             log_error "install_horizon_cli: Failed to fix dependencies"
