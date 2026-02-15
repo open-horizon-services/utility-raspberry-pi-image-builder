@@ -106,4 +106,4 @@ See `samples/` directory for more examples:
 
 ## License
 
-MIT
+Apache 2.0
