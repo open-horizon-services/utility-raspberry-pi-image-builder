@@ -1,0 +1,20 @@
+#cloud-config
+hostname: rpi-static
+users:
+  - name: pi
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    passwd: ""
+
+ethernets:
+  eth0:
+    addresses:
+      - 192.168.1.100/24
+    gateway4: 192.168.1.1
+    nameservers:
+      addresses:
+        - 8.8.8.8
+        - 8.8.4.4
+
+runcmd:
+  - echo "Raspberry Pi configured with static IP" > /home/pi/network-setup.txt

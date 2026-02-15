@@ -1,0 +1,11 @@
+#cloud-config
+hostname: rpi-ssh
+users:
+  - name: pi
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC... your-key-comment
+
+runcmd:
+  - echo "Raspberry Pi SSH keys configured" > /home/pi/ssh-setup.txt

@@ -1,0 +1,10 @@
+#cloud-config
+hostname: rpi-test
+ssh_pwauth: true
+users:
+  - name: pi
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    passwd: "$6$rounds=4096$xyz"
+runcmd:
+  - echo "Raspberry Pi booted" > /home/pi/booted.txt
