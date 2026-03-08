@@ -1,74 +1,54 @@
 # RPI Burner
 
-macOS CLI tool to burn Raspberry Pi images to SD cards with Cloud Init support.
+![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)
+![Platform](https://img.shields.io/badge/platform-macOS-lightgrey.svg)
+![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)
 
-## Features
+A macOS CLI tool for creating custom Raspberry Pi SD card images with Cloud Init support. Detects removable disks, burns `.img` files, and injects cloud-config — all from the terminal.
 
-- Detect removable disks (SD cards, USB drives)
-- Interactive or command-line disk selection
-- Burn `.img` or `.iso` files to SD cards
-- Inject Cloud Init configuration
-- Progress display during burn
-- Safety confirmation before writing
+## Prerequisites
 
-## Installation
+- macOS (uses `diskutil` and `dd`)
+- Python 3.10+
+- An SD card reader with a card inserted
+
+## Quick Start
 
 ```bash
-git clone https://github.com/yourusername/rpi-burner.git
-cd rpi-burner
-python -m venv venv
-source venv/bin/activate
+git clone https://github.com/open-horizon-services/utility-raspberry-pi-image-builder.git
+cd utility-raspberry-pi-image-builder
+python -m venv venv && source venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-## Usage
-
-**Requires sudo** - Disk operations need root access:
-
-```bash
-sudo rpi-burner burn image.img -d /dev/disk4
-```
-
-### List available disks
+List available disks, then burn:
 
 ```bash
 rpi-burner list
+sudo rpi-burner burn image.img -d /dev/disk4 --cloud-init config.yaml
 ```
 
-### Burn an image (interactive)
+> **Requires sudo** — disk write operations need root access.
+
+## Usage
 
 ```bash
-rpi-burner burn image.img
-```
-
-### Burn an image (specify disk)
-
-```bash
-rpi-burner burn image.img -d /dev/disk4
-```
-
-### Burn with Cloud Init
-
-```bash
-rpi-burner burn image.img --cloud-init config.yaml
-```
-
-### Skip confirmation (scripting)
-
-```bash
-rpi-burner burn image.img -d /dev/disk4 --confirm
+rpi-burner list                                    # List removable disks
+rpi-burner burn <image> [options]                   # Burn image to disk
 ```
 
 ### Options
 
-- `-d, --disk TEXT` - Target disk device path
-- `--confirm` - Skip confirmation prompt
-- `--no-eject` - Don't eject disk after writing
-- `--cloud-init PATH` - Cloud-init config file (YAML)
+| Flag | Description |
+|---|---|
+| `-d, --disk PATH` | Target disk device path (e.g., `/dev/disk4`). Prompts interactively if omitted. |
+| `--cloud-init PATH` | Cloud-init config file (YAML) to inject onto boot partition. |
+| `--confirm` | Skip the confirmation prompt (use with caution). |
+| `--no-eject` | Don't eject the disk after writing. |
 
-## Cloud Init Examples
+## Cloud Init
 
-### Basic
+Provide a YAML cloud-config file to configure the Pi on first boot. The file is written to the FAT32 boot partition as `user-data`.
 
 ```yaml
 #cloud-config
@@ -77,32 +57,13 @@ users:
   - name: pi
     sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/bash
-    passwd: "$6$rounds=4096$...hashed..."
+    ssh_authorized_keys:
+      - ssh-rsa AAAAB3... your-key
 runcmd:
-  - echo "Raspberry Pi booted" > /home/pi/booted.txt
+  - echo "Ready" > /home/pi/booted.txt
 ```
 
-### Wi-Fi
-
-```yaml
-#cloud-config
-hostname: rpi-wifi
-wifi:
-  wlan0:
-    ssid: "YourNetworkName"
-    password: "YourPassword"
-```
-
-See `samples/` directory for more examples:
-- `samples/wifi-example.yaml` - Wi-Fi configuration
-- `samples/static-ip-example.yaml` - Static IP configuration  
-- `samples/ssh-keys-example.yaml` - SSH key authentication
-
-## Safety
-
-- Always confirm before writing
-- Double-check the target device
-- Wrong device = data loss
+See `samples/` for more examples: [Wi-Fi](samples/wifi-example.yaml), [static IP](samples/static-ip-example.yaml), [SSH keys](samples/ssh-keys-example.yaml).
 
 ## License
 
