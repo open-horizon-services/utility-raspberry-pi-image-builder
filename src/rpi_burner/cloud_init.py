@@ -91,4 +91,5 @@ def load_cloud_config(config_path: Path) -> str:
     if not isinstance(config, dict):
         raise CloudInitError("Cloud config must be a YAML dictionary")
 
-    return yaml.dump(config, default_flow_style=False)
+    result: str = yaml.dump(config, default_flow_style=False)
+    return result

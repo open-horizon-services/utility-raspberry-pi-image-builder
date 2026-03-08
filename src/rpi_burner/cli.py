@@ -73,7 +73,7 @@ def list_disks():
     try:
         disks = list_external_disks()
     except DiskDetectorError as e:
-        console.print(f"[red]Error:[/red] {e}", file=sys.stderr)
+        console.print(f"[red]Error:[/red] {e}")
         sys.exit(1)
 
     if not disks:
@@ -114,7 +114,7 @@ def burn(
     confirm: bool,
     no_eject: bool,
     cloud_init_file: Path | None,
-):
+) -> None:
     """Burn an image to a removable disk."""
     try:
         disk = select_disk(interactive=False, disk_path=disk_path)
