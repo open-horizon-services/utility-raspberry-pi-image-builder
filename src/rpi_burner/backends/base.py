@@ -1,0 +1,26 @@
+"""Platform backend protocol definitions."""
+
+from pathlib import Path
+from typing import Protocol
+
+from rpi_burner.models import Disk
+
+
+class PlatformBackend(Protocol):
+    """Interface that each platform backend must implement."""
+
+    def list_external_disks(self) -> list[Disk]: ...
+
+    def get_disk_info(self, device_path: str) -> Disk: ...
+
+    def unmount_disk(self, device_path: str) -> None: ...
+
+    def burn_image(self, image_path: str, device_path: str, progress: bool = True) -> None: ...
+
+    def eject_disk(self, device_path: str) -> None: ...
+
+    def get_boot_partition(self, device_path: str) -> str | None: ...
+
+    def mount_partition(self, partition_path: str) -> Path: ...
+
+    def write_file(self, path: Path, content: str) -> None: ...

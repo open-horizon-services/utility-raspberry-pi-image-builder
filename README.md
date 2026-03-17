@@ -1,16 +1,25 @@
 # RPI Burner
 
 ![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)
-![Platform](https://img.shields.io/badge/platform-macOS-lightgrey.svg)
+![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)
 ![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)
 
-A macOS CLI tool for creating custom Raspberry Pi SD card images with Cloud Init support. Detects removable disks, burns `.img` files, and injects cloud-config — all from the terminal.
+A CLI tool for creating custom Raspberry Pi SD card images with Cloud Init support. Detects removable disks, burns `.img` files, and injects cloud-config — all from the terminal. Supports macOS and Linux.
 
 ## Prerequisites
 
-- macOS (uses `diskutil` and `dd`)
+- **macOS** or **Linux**
 - Python 3.10+
 - An SD card reader with a card inserted
+
+### Platform-specific tools
+
+| Platform | Tools used |
+|---|---|
+| macOS | `diskutil`, `dd` |
+| Linux | `lsblk`, `dd`, `umount`, `mount`, `eject`/`udisksctl` |
+
+> These are standard system utilities — no extra installation needed on most systems.
 
 ## Quick Start
 
@@ -25,10 +34,11 @@ List available disks, then burn:
 
 ```bash
 rpi-burner list
-sudo rpi-burner burn image.img -d /dev/disk4 --cloud-init config.yaml
+rpi-burner burn image.img -d /dev/disk4 --cloud-init config.yaml   # macOS
+rpi-burner burn image.img -d /dev/sdb --cloud-init config.yaml    # Linux
 ```
 
-> **Requires sudo** — disk write operations need root access.
+> Disk write operations require root access. On Linux, the tool automatically elevates privileged commands via `sudo` — you may be prompted for your password. On macOS, run the tool with `sudo` directly.
 
 ## Usage
 

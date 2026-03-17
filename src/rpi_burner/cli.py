@@ -1,4 +1,5 @@
 """CLI interface for rpi-burner."""
+
 import sys
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from rpi_burner.cloud_init import (
     CloudInitError,
     get_boot_partition,
     load_cloud_config,
+    load_network_config,
     mount_partition,
     write_cloud_init_files,
 )
@@ -108,12 +110,19 @@ def list_disks():
     type=click.Path(exists=True, path_type=Path),
     help="Cloud-init config file (YAML)",
 )
+@click.option(
+    "--network-config",
+    "network_config_file",
+    type=click.Path(exists=True, path_type=Path),
+    help="Cloud-init network config file (YAML). Defaults to eth0 DHCP.",
+)
 def burn(
     image: Path,
     disk_path: str | None,
     confirm: bool,
     no_eject: bool,
     cloud_init_file: Path | None,
+    network_config_file: Path | None,
 ) -> None:
     """Burn an image to a removable disk."""
     try:
@@ -160,7 +169,10 @@ def burn(
             else:
                 mount_point = mount_partition(boot_part)
                 user_data = load_cloud_config(cloud_init_file)
-                write_cloud_init_files(mount_point, user_data)
+                network_config = (
+                    load_network_config(network_config_file) if network_config_file else None
+                )
+                write_cloud_init_files(mount_point, user_data, network_config)
                 console.print(f"[bold green]Cloud Init files written to {mount_point}[/bold green]")
         except CloudInitError as e:
             console.print(f"[red]Cloud Init error:[/red] {e}")
