@@ -5,6 +5,7 @@ from rpi_burner.cloud_init import (
     get_boot_partition,
     load_cloud_config,
     load_network_config,
+    load_wpa_supplicant,
     mount_partition,
     write_cloud_init_files,
 )
@@ -31,6 +32,7 @@ __all__ = [
     "CloudInitError",
     "generate_meta_data",
     "load_network_config",
+    "load_wpa_supplicant",
     "list_external_disks",
     "get_disk_info",
     "burn_image",

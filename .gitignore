@@ -8,6 +8,8 @@ build-rpi-image.log
 *.swp
 *~
 config.yaml
+network.yaml
+wpa_supplicant.conf
 
 # Test artifacts
 test/integration/logs/

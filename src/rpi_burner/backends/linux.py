@@ -3,6 +3,7 @@
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 
 from rpi_burner.exceptions import CloudInitError, DiskDetectorError, DiskWriterError
@@ -265,6 +266,16 @@ class LinuxBackend:
         ]:
             try:
                 subprocess.run(cmd, check=True, capture_output=True, text=True)
-                return
+                break
             except (subprocess.CalledProcessError, FileNotFoundError):
                 continue
+
+        try:
+            subprocess.run(
+                ["udevadm", "settle", "--timeout=5"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError:
+            time.sleep(2)

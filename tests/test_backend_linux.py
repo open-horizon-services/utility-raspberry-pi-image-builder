@@ -357,11 +357,12 @@ def test_get_boot_partition():
 
     mock_sync = MagicMock()
     mock_partprobe = MagicMock()
+    mock_udevadm = MagicMock()
     mock_lsblk = MagicMock()
     mock_lsblk.stdout = mock_json
 
     backend = LinuxBackend()
-    with patch("subprocess.run", side_effect=[mock_sync, mock_partprobe, mock_lsblk]):
+    with patch("subprocess.run", side_effect=[mock_sync, mock_partprobe, mock_udevadm, mock_lsblk]):
         result = backend.get_boot_partition("/dev/sdb")
 
     assert result == "/dev/sdb1"
@@ -384,11 +385,12 @@ def test_get_boot_partition_no_vfat():
 
     mock_sync = MagicMock()
     mock_partprobe = MagicMock()
+    mock_udevadm = MagicMock()
     mock_lsblk = MagicMock()
     mock_lsblk.stdout = mock_json
 
     backend = LinuxBackend()
-    with patch("subprocess.run", side_effect=[mock_sync, mock_partprobe, mock_lsblk]):
+    with patch("subprocess.run", side_effect=[mock_sync, mock_partprobe, mock_udevadm, mock_lsblk]):
         result = backend.get_boot_partition("/dev/sdb")
 
     assert result is None

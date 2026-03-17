@@ -2,6 +2,7 @@
 
 import plistlib
 import subprocess
+import time
 from pathlib import Path
 
 from rpi_burner.exceptions import CloudInitError, DiskDetectorError, DiskWriterError
@@ -138,7 +139,24 @@ class DarwinBackend:
         except subprocess.CalledProcessError as e:
             raise DiskWriterError(f"Failed to eject disk: {e.stderr}") from e
 
+    def _reread_partition_table(self, device_path: str) -> None:
+        """Force a rescan of the partition table on macOS."""
+        try:
+            subprocess.run(["sync"], check=False)
+            subprocess.run(
+                ["diskutil", "list", device_path],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            # Give the system a moment to process the rescan
+            time.sleep(0.5)
+        except Exception:
+            # Ignore errors in rescan - best effort
+            pass
+
     def get_boot_partition(self, device_path: str) -> str | None:
+        self._reread_partition_table(device_path)
         try:
             result = subprocess.run(
                 ["diskutil", "list", "-plist", device_path],
@@ -157,7 +175,9 @@ class DarwinBackend:
             for partition in partitions:
                 content = partition.get("Content", "")
                 if content in ("DOS", "FAT32", "msdos", "Windows_FAT_32"):
-                    return f"/dev/{partition.get('DeviceIdentifier')}"
+                    device_id = partition.get("DeviceIdentifier")
+                    if device_id:
+                        return f"/dev/{device_id}"
 
         return None
 

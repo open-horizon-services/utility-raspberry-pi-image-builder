@@ -26,6 +26,7 @@ rpi-burner burn image.img -d /dev/disk4            # Specify disk
 rpi-burner burn image.img --confirm                # Skip confirmation
 rpi-burner burn image.img --cloud-init config.yaml # With cloud-init
 rpi-burner burn image.img --cloud-init config.yaml --network-config network.yaml  # With custom network
+rpi-burner burn image.img --cloud-init config.yaml --wpa-supplicant wpa_supplicant.conf  # With WiFi
 ```
 
 ### Testing
@@ -108,12 +109,12 @@ src/rpi_burner/
   exceptions.py      # Centralized custom exceptions (DiskDetectorError, DiskWriterError, CloudInitError)
   disk_detector.py   # Thin delegate -> backends for disk listing/info
   disk_writer.py     # Thin delegate -> backends for burn/unmount/eject
-  cloud_init.py      # Cloud-init loading (preserves #cloud-config header, generates meta-data with instance-id, default network-config) + delegates boot partition/mount/file writes to backends
+  cloud_init.py      # Cloud-init loading (preserves #cloud-config header, generates meta-data with instance-id, default network-config, auto-injects keyboard layout, supports WPA supplicant for WiFi) + delegates boot partition/mount/file writes to backends
   backends/
     __init__.py      # get_backend() factory — selects DarwinBackend or LinuxBackend by sys.platform
     base.py          # PlatformBackend Protocol — interface all backends implement
     darwin.py        # macOS backend (diskutil plist parsing, dd, diskutil mount/eject, direct file writes)
-    linux.py         # Linux backend (lsblk JSON parsing, dd, umount/mount, eject/udisksctl, file writes via sudo tee) — auto-elevates via sudo, re-reads partition table after burn
+    linux.py         # Linux backend (lsblk JSON parsing, dd, umount/mount, eject/udisksctl, file writes via sudo tee) — auto-elevates via sudo, re-reads partition table + udevadm settle after burn
 tests/
   test_disk_detector.py   # Unit tests for macOS disk detection with mocked subprocess
   test_backend_linux.py   # Unit tests for Linux backend with mocked subprocess

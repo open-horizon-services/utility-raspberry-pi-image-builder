@@ -7,9 +7,11 @@ import pytest
 
 from rpi_burner.cloud_init import (
     DEFAULT_NETWORK_CONFIG,
+    detect_keyboard_layout,
     generate_meta_data,
     load_cloud_config,
     load_network_config,
+    network_config_has_wifi,
     write_cloud_init_files,
 )
 from rpi_burner.exceptions import CloudInitError
@@ -71,6 +73,46 @@ def test_load_cloud_config_file_not_found():
         load_cloud_config(Path("/nonexistent/config.yaml"))
 
 
+def test_load_cloud_config_injects_keyboard_when_missing(tmp_path: Path):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("#cloud-config\nhostname: rpi\n")
+
+    result = load_cloud_config(config_file)
+
+    assert "keyboard:" in result
+    assert "layout:" in result
+    assert "model: pc105" in result
+
+
+def test_load_cloud_config_preserves_existing_keyboard(tmp_path: Path):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("#cloud-config\nhostname: rpi\nkeyboard:\n  layout: de\n")
+
+    result = load_cloud_config(config_file)
+
+    assert "layout: de" in result
+    assert "pc105" not in result
+
+
+def test_detect_keyboard_layout_reads_system_config(tmp_path: Path):
+    kb_file = tmp_path / "keyboard"
+    kb_file.write_text('XKBMODEL="pc105"\nXKBLAYOUT="fr"\nXKBVARIANT=""\n')
+
+    with patch("rpi_burner.cloud_init.Path") as mock_path_cls:
+        mock_path_cls.return_value.read_text.return_value = kb_file.read_text()
+        result = detect_keyboard_layout()
+
+    assert result == "fr"
+
+
+def test_detect_keyboard_layout_defaults_to_us():
+    with patch("rpi_burner.cloud_init.Path") as mock_path_cls:
+        mock_path_cls.return_value.read_text.side_effect = OSError
+        result = detect_keyboard_layout()
+
+    assert result == "us"
+
+
 def test_write_cloud_init_files_creates_user_data(tmp_path: Path):
     write_cloud_init_files(tmp_path, "#cloud-config\nhostname: rpi\n")
 
@@ -114,32 +156,68 @@ def test_write_cloud_init_files_bad_mount_point():
         write_cloud_init_files(Path("/nonexistent/mount"), "data")
 
 
-def test_load_network_config(tmp_path: Path):
+def test_load_network_config_returns_raw_text(tmp_path: Path):
+    raw = (
+        "network:\n  version: 2\n  wifis:\n    wlan0:\n"
+        '      access-points:\n        "My WiFi":\n'
+        '          password: "s3cret!"\n'
+    )
     config_file = tmp_path / "network.yaml"
-    config_file.write_text("network:\n  version: 2\n  ethernets:\n    eth0:\n      dhcp4: true\n")
+    config_file.write_text(raw)
 
     result = load_network_config(config_file)
 
-    assert "eth0" in result
-    assert "dhcp4: true" in result
+    assert result == raw
 
 
-def test_load_network_config_invalid_yaml(tmp_path: Path):
-    config_file = tmp_path / "bad.yaml"
-    config_file.write_text(":\n  - :\n  ]")
+def test_load_network_config_preserves_quotes(tmp_path: Path):
+    config_file = tmp_path / "network.yaml"
+    config_file.write_text('        "MySSID":\n          password: "pass word"\n')
 
-    with pytest.raises(CloudInitError, match="Invalid network config YAML"):
-        load_network_config(config_file)
+    result = load_network_config(config_file)
 
-
-def test_load_network_config_not_a_dict(tmp_path: Path):
-    config_file = tmp_path / "list.yaml"
-    config_file.write_text("- item1\n- item2\n")
-
-    with pytest.raises(CloudInitError, match="Network config must be a YAML dictionary"):
-        load_network_config(config_file)
+    assert '"MySSID"' in result
+    assert '"pass word"' in result
 
 
 def test_load_network_config_file_not_found():
     with pytest.raises(CloudInitError, match="Network config file not found"):
         load_network_config(Path("/nonexistent/network.yaml"))
+
+
+def test_network_config_has_wifi_with_wifis():
+    config = """network:
+  version: 2
+  wifis:
+    wlan0:
+      dhcp4: true
+"""
+    assert network_config_has_wifi(config) is True
+
+
+def test_network_config_has_wifi_without_wifis():
+    config = """network:
+  version: 2
+  ethernets:
+    eth0:
+      dhcp4: true
+"""
+    assert network_config_has_wifi(config) is False
+
+
+def test_network_config_has_wifi_empty():
+    config = ""
+    assert network_config_has_wifi(config) is False
+
+
+def test_network_config_has_wifi_invalid_yaml():
+    config = "invalid: yaml: content:"
+    assert network_config_has_wifi(config) is False
+
+
+def test_network_config_has_wifi_no_network_key():
+    config = """wifis:
+  wlan0:
+    dhcp4: true
+"""
+    assert network_config_has_wifi(config) is False

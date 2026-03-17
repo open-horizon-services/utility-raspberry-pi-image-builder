@@ -25,6 +25,7 @@ Requires-Dist: pytest-cov>=4.1.0; extra == "dev"
 Requires-Dist: ruff>=0.1.0; extra == "dev"
 Requires-Dist: mypy>=1.5.0; extra == "dev"
 Requires-Dist: pytest-mock>=3.12.0; extra == "dev"
+Requires-Dist: types-PyYAML>=6.0; extra == "dev"
 Dynamic: license-file
 
 # RPI Burner
@@ -63,11 +64,11 @@ List available disks, then burn:
 
 ```bash
 rpi-burner list
-sudo rpi-burner burn image.img -d /dev/disk4 --cloud-init config.yaml   # macOS
-sudo rpi-burner burn image.img -d /dev/sdb --cloud-init config.yaml    # Linux
+rpi-burner burn image.img -d /dev/disk4 --cloud-init config.yaml   # macOS
+rpi-burner burn image.img -d /dev/sdb --cloud-init config.yaml    # Linux
 ```
 
-> **Requires sudo** — disk write operations need root access.
+> Disk write operations require root access. On Linux, the tool automatically elevates privileged commands via `sudo` — you may be prompted for your password. On macOS, run the tool with `sudo` directly.
 
 ## Usage
 

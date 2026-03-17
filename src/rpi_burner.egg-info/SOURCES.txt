@@ -19,4 +19,5 @@ src/rpi_burner/backends/base.py
 src/rpi_burner/backends/darwin.py
 src/rpi_burner/backends/linux.py
 tests/test_backend_linux.py
+tests/test_cloud_init.py
 tests/test_disk_detector.py
