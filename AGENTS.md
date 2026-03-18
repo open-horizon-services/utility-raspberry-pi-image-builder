@@ -1,7 +1,7 @@
 # AGENTS.md - RPI Burner Development Guide
 
 ## Project Overview
-macOS-only CLI tool (Python 3.10+) to burn Raspberry Pi images to SD cards with Cloud Init support. Uses `diskutil` and `dd` under the hood — requires sudo for disk operations.
+Cross-platform CLI tool (Python 3.10+, macOS and Linux) to burn Raspberry Pi images to SD cards with Cloud Init support. Uses platform-specific backends (`diskutil`/`dd` on macOS, `lsblk`/`dd`/`umount`/`mount` on Linux). On Linux, privileged commands are automatically elevated via `sudo`. On macOS, the tool must be run under `sudo`.
 
 ## Technology Stack
 - **Python 3.10+** (minimum, uses `X | Y` union syntax)
@@ -25,6 +25,8 @@ rpi-burner burn image.img                          # Interactive disk selection
 rpi-burner burn image.img -d /dev/disk4            # Specify disk
 rpi-burner burn image.img --confirm                # Skip confirmation
 rpi-burner burn image.img --cloud-init config.yaml # With cloud-init
+rpi-burner burn image.img --cloud-init config.yaml --network-config network.yaml  # With custom network
+rpi-burner burn image.img --cloud-init config.yaml --wpa-supplicant wpa_supplicant.conf  # With WiFi
 ```
 
 ### Testing
@@ -84,7 +86,7 @@ def func(path: str | None) -> None:    # not Optional[str]
 ```
 
 ### Error Handling
-- Custom exceptions per module, inheriting from `Exception` (e.g., `DiskDetectorError`, `DiskWriterError`, `CloudInitError`)
+- Custom exceptions centralized in `exceptions.py`, inheriting from `Exception` (e.g., `DiskDetectorError`, `DiskWriterError`, `CloudInitError`)
 - Re-raise with `from e` to preserve tracebacks: `raise FooError("msg") from e`
 - Fail fast with clear messages. Never use bare `except` or empty `except: pass`
 
@@ -104,16 +106,25 @@ src/rpi_burner/
   __init__.py        # Public API re-exports with __all__
   cli.py             # Click CLI entry point + Rich terminal UI
   models.py          # Disk dataclass
-  disk_detector.py   # diskutil plist parsing -> Disk objects
-  disk_writer.py     # dd-based image writing, unmount/eject
-  cloud_init.py      # Boot partition detection, cloud-init file injection
+  exceptions.py      # Centralized custom exceptions (DiskDetectorError, DiskWriterError, CloudInitError)
+  disk_detector.py   # Thin delegate -> backends for disk listing/info
+  disk_writer.py     # Thin delegate -> backends for burn/unmount/eject
+  cloud_init.py      # Cloud-init loading (preserves #cloud-config header, generates meta-data with instance-id, default network-config, auto-injects keyboard layout, supports WPA supplicant for WiFi) + delegates boot partition/mount/file writes to backends
+  backends/
+    __init__.py      # get_backend() factory — selects DarwinBackend or LinuxBackend by sys.platform
+    base.py          # PlatformBackend Protocol — interface all backends implement
+    darwin.py        # macOS backend (diskutil plist parsing, dd, diskutil mount/eject, direct file writes)
+    linux.py         # Linux backend (lsblk JSON parsing, dd, umount/mount, eject/udisksctl, file writes via sudo tee) — auto-elevates via sudo, re-reads partition table + udevadm settle after burn
 tests/
-  test_disk_detector.py   # Unit tests with mocked subprocess
+  test_disk_detector.py   # Unit tests for macOS disk detection with mocked subprocess
+  test_backend_linux.py   # Unit tests for Linux backend with mocked subprocess
+  test_cloud_init.py      # Unit tests for cloud-init loading and file writing
 ```
 
 ### Module Pattern
-Each module follows: imports -> custom Exception class -> functions.
-All subprocess interactions are in dedicated modules (not cli.py).
+Top-level modules (`disk_detector.py`, `disk_writer.py`, `cloud_init.py`) are thin delegates that call `get_backend()` and forward to the platform-specific backend. All subprocess interactions live in `backends/darwin.py` and `backends/linux.py` — never in `cli.py` or the delegate modules.
+
+Custom exceptions are centralized in `exceptions.py` and re-exported from the delegate modules for backward compatibility.
 
 ---
 
@@ -138,15 +149,15 @@ with patch("subprocess.run", return_value=mock_result):
 - Functions: `test_<what_it_tests>` (plain functions, no classes)
 
 ### What NOT to test
-- Never test actual disk operations (dd, diskutil) in unit tests
+- Never test actual disk operations (dd, diskutil, lsblk) in unit tests
 - No integration tests currently (would require real hardware)
 
 ---
 
 ## Safety Notes for Agents
-- **macOS-only**: All disk operations use `diskutil` (will not work on Linux)
-- **Device paths are destructive**: Wrong `/dev/diskN` = data loss. Never hardcode device paths.
-- **Subprocess calls need mocking**: Always mock in tests, never call real `diskutil`/`dd`
+- **Cross-platform**: macOS uses `diskutil`/`dd`, Linux uses `lsblk`/`dd`/`umount`/`mount`. Platform detected at runtime via `get_backend()`.
+- **Device paths are destructive**: Wrong `/dev/diskN` (macOS) or `/dev/sdX` (Linux) = data loss. Never hardcode device paths.
+- **Subprocess calls need mocking**: Always mock in tests, never call real `diskutil`/`dd`/`lsblk`
 - Cloud-init files target FAT32 boot partitions specifically
 
 ---

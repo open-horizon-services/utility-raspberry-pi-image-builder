@@ -1,4 +1,5 @@
 """CLI interface for rpi-burner."""
+
 import sys
 from pathlib import Path
 
@@ -11,7 +12,10 @@ from rpi_burner.cloud_init import (
     CloudInitError,
     get_boot_partition,
     load_cloud_config,
+    load_network_config,
+    load_wpa_supplicant,
     mount_partition,
+    network_config_has_wifi,
     write_cloud_init_files,
 )
 from rpi_burner.disk_detector import DiskDetectorError, get_disk_info, list_external_disks
@@ -108,12 +112,26 @@ def list_disks():
     type=click.Path(exists=True, path_type=Path),
     help="Cloud-init config file (YAML)",
 )
+@click.option(
+    "--network-config",
+    "network_config_file",
+    type=click.Path(exists=True, path_type=Path),
+    help="Cloud-init network config file (YAML). Defaults to eth0 DHCP.",
+)
+@click.option(
+    "--wpa-supplicant",
+    "wpa_supplicant_file",
+    type=click.Path(exists=True, path_type=Path),
+    help="WPA supplicant config file for WiFi (optional, overrides network-config WiFi settings).",
+)
 def burn(
     image: Path,
     disk_path: str | None,
     confirm: bool,
     no_eject: bool,
     cloud_init_file: Path | None,
+    network_config_file: Path | None,
+    wpa_supplicant_file: Path | None,
 ) -> None:
     """Burn an image to a removable disk."""
     try:
@@ -127,6 +145,10 @@ def burn(
     console.print(f"  Target: {disk.display_name} ({disk.size_gb:.2f} GB)")
     if cloud_init_file:
         console.print(f"  Cloud-Init: {cloud_init_file}")
+    if network_config_file:
+        console.print(f"  Network Config: {network_config_file}")
+    if wpa_supplicant_file:
+        console.print(f"  WPA Supplicant: {wpa_supplicant_file}")
     console.print()
 
     if not confirm:
@@ -160,7 +182,31 @@ def burn(
             else:
                 mount_point = mount_partition(boot_part)
                 user_data = load_cloud_config(cloud_init_file)
-                write_cloud_init_files(mount_point, user_data)
+                network_config = (
+                    load_network_config(network_config_file) if network_config_file else None
+                )
+                wpa_supplicant = (
+                    load_wpa_supplicant(wpa_supplicant_file) if wpa_supplicant_file else None
+                )
+
+                # Warn if network config has WiFi but no wpa_supplicant
+                if (
+                    network_config
+                    and network_config_has_wifi(network_config)
+                    and not wpa_supplicant
+                ):
+                    console.print("[yellow]Warning: Network config contains WiFi settings but")
+                    console.print("[yellow]--wpa-supplicant was not provided.[/yellow]")
+                    console.print(
+                        "[yellow]WiFi will be blocked by rfkill without a country code[/yellow]"
+                    )
+                    console.print("[yellow]in wpa_supplicant.conf.[/yellow]")
+                    console.print(
+                        "[yellow]Use --wpa-supplicant with a file containing 'country=XX'[/yellow]"
+                    )
+                    console.print("[yellow]to fix this.[/yellow]")
+
+                write_cloud_init_files(mount_point, user_data, network_config, wpa_supplicant)
                 console.print(f"[bold green]Cloud Init files written to {mount_point}[/bold green]")
         except CloudInitError as e:
             console.print(f"[red]Cloud Init error:[/red] {e}")
