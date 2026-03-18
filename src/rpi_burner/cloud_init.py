@@ -62,6 +62,9 @@ def write_cloud_init_files(
     if wpa_supplicant:
         backend.write_file(mount_path / "wpa_supplicant.conf", wpa_supplicant)
 
+    # Always create an empty ssh file to enable SSH on Raspberry Pi OS
+    backend.write_file(mount_path / "ssh", "")
+
 
 def detect_keyboard_layout() -> str:
     try:
