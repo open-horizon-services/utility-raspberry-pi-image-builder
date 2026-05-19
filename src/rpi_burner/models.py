@@ -1,4 +1,5 @@
 """Data models for rpi-burner."""
+
 from dataclasses import dataclass
 
 
@@ -9,7 +10,7 @@ class Disk:
     size_bytes: int
     file_system: str
     is_removable: bool
-    is_ejectable: bool
+    is_ejectable: bool = False
 
     @property
     def size_gb(self) -> float:

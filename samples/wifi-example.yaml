@@ -1,15 +1,9 @@
 #cloud-config
 hostname: rpi-wifi
-wifi:
-  wlan0:
-    ssid: "YourNetworkName"
-    password: "YourPassword"
-
 users:
   - name: pi
     sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/bash
-    passwd: ""
-
-runcmd:
-  - echo "Raspberry Pi configured with Wi-Fi" > /home/pi/wifi-setup.txt
+    lock_passwd: true
+    ssh_authorized_keys:
+      - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC... your-key-comment
